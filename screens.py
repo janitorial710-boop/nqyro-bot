@@ -36,8 +36,8 @@ def connect(u, sub=None):
         "<b>Подключение за 3 шага</b>\n\n1. Установи Happ или Incy\n2. Нажми «Добавить подписку»\n3. Включи VPN и пользуйся",
         Markup(inline_keyboard=[
             [b("Скачать Happ", "url:" + config.HAPP_URL), b("Скачать Incy", "url:" + config.INCY_URL)],
-            [b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=sub))],
-            [b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=sub))],
+            *([[b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=sub))],
+               [b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=sub))]] if config.OPEN_URL else []),
             [Btn(text="Скопировать ссылку", copy_text=CopyTextButton(text=sub))],
             [b("Назад", "go:start")]]))
 
