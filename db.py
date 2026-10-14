@@ -12,6 +12,58 @@ CREATE TABLE IF NOT EXISTS payments(
   method TEXT, status TEXT, created INTEGER);
 """)
 
+for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT"):
+    try:
+        con.execute(_sql); con.commit()
+    except sqlite3.OperationalError:
+        pass
+
+con.executescript("""
+CREATE TABLE IF NOT EXISTS promo_codes(
+  code TEXT PRIMARY KEY, days INTEGER, max_uses INTEGER DEFAULT 0, used INTEGER DEFAULT 0, created INTEGER);
+CREATE TABLE IF NOT EXISTS promo_uses(
+  code TEXT, user_id INTEGER, ts INTEGER, PRIMARY KEY(code, user_id));
+""")
+
+def create_promo(code, days, max_uses=0):
+    con.execute("INSERT OR REPLACE INTO promo_codes(code,days,max_uses,used,created) VALUES(?,?,?,COALESCE((SELECT used FROM promo_codes WHERE code=?),0),?)",
+                (code.upper(), days, max_uses, code.upper(), int(time.time()))); con.commit()
+
+def delete_promo(code):
+    cur = con.execute("DELETE FROM promo_codes WHERE code=?", (code.upper(),)); con.commit(); return cur.rowcount
+
+def list_promos():
+    return con.execute("SELECT * FROM promo_codes ORDER BY created DESC").fetchall()
+
+def use_promo(uid, code):
+    """Возвращает (статус, дней, до_какого_числа). Один код можно применить один раз на аккаунт."""
+    code = code.strip().upper()
+    p = con.execute("SELECT * FROM promo_codes WHERE code=?", (code,)).fetchone()
+    if not p: return ("not_found", 0, 0)
+    if p["max_uses"] and p["used"] >= p["max_uses"]: return ("exhausted", 0, 0)
+    try:
+        con.execute("INSERT INTO promo_uses(code,user_id,ts) VALUES(?,?,?)", (code, uid, int(time.time())))
+    except sqlite3.IntegrityError:
+        return ("already", 0, 0)
+    con.execute("UPDATE promo_codes SET used=used+1 WHERE code=?", (code,)); con.commit()
+    return ("ok", p["days"], extend(uid, p["days"]))
+
+def set_yk_id(pid, yk_id):
+    con.execute("UPDATE payments SET yk_id=? WHERE id=?", (yk_id, pid)); con.commit()
+
+def get_payment(pid):
+    return con.execute("SELECT * FROM payments WHERE id=?", (pid,)).fetchone()
+
+def cancel_payment(pid):
+    con.execute("UPDATE payments SET status='canceled' WHERE id=? AND status='pending'", (pid,)); con.commit()
+
+def pending_payments(max_age=86400):
+    return con.execute("SELECT * FROM payments WHERE status='pending' AND yk_id IS NOT NULL AND created>?",
+                       (int(time.time()) - max_age,)).fetchall()
+
+def set_email(uid, email):
+    con.execute("UPDATE users SET email=? WHERE id=?", (email, uid)); con.commit()
+
 def get_user(uid, ref=None):
     row = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     if row is None:

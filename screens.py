@@ -18,7 +18,7 @@ def start(u):
         kb([("Попробовать 5 дней", "trial")],
            [("Подключиться", "go:connect"), ("Тарифы", "go:plans")],
            [("Профиль", "go:profile"), ("Друзья", "go:friends")],
-           [("Поддержка", "go:support")]))
+           [("Промокод", "promo"), ("Поддержка", "go:support")]))
 
 def trial(u, ok=True):
     if not ok:
@@ -51,15 +51,15 @@ def payment(u, plan):
     price, _, name = config.PLANS[plan]
     return ("05_payment.png", f"<b>Оплата</b>\n\nТариф: {name}\nК оплате: {price} ₽\n\nВыбери способ оплаты.",
         kb([("СБП", f"pay:{plan}:sbp")], [("Банковская карта", f"pay:{plan}:card")],
-           [("Telegram Stars", f"pay:{plan}:stars"), ("Крипта", f"pay:{plan}:crypto")], [("Назад", "go:plans")]))
+           [("Другие способы", f"pay:{plan}:any")], [("Назад", "go:plans")]))
 
 def pay_dev(u, pid):
     return ("05_payment.png", "<b>Тестовый режим</b>\n\nПлатёжный сервис не подключён. Нажми кнопку, чтобы имитировать оплату.",
             kb([("Имитировать оплату", f"devpay:{pid}")], [("Назад", "go:plans")]))
 
-def pay_link(u, url):
-    return ("05_payment.png", "<b>Счёт создан</b>\n\nОплати по кнопке. Подписка продлится автоматически.",
-            Markup(inline_keyboard=[[b("Оплатить", "url:" + url)], [b("Назад", "go:plans")]]))
+def pay_link(u, url, pid):
+    return ("05_payment.png", "<b>Счёт создан</b>\n\nОплати по кнопке. Подписка продлится автоматически, обычно за минуту после оплаты.",
+            Markup(inline_keyboard=[[b("Оплатить", "url:" + url)], [b("Проверить оплату", f"chk:{pid}")], [b("Назад", "go:plans")]]))
 
 def success(u, until):
     return ("06_success.png", f"<b>Оплата прошла</b>\n\nПодписка активна до {d(until)}.\n\nСсылка для подключения ждёт в разделе «Подключиться».",
@@ -71,7 +71,7 @@ def profile(u):
     text = (f"<b>Профиль</b>\n\nСтатус: {'активна' if active else 'не активна'}\n"
             f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3")
     return ("07_profile.png", text,
-        kb([("Продлить", "go:plans")], [("Подключиться", "go:connect"), ("Поддержка", "go:support")], [("Назад", "go:start")]))
+        kb([("Продлить", "go:plans")], [("Подключиться", "go:connect"), ("Промокод", "promo")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
 
 def friends(u):
     n, bal = db.friends_stats(u["id"])
@@ -92,3 +92,17 @@ def support(u):
 def error(u):
     return ("11_error.png", "<b>Что-то пошло не так</b>\n\nПлатёж не прошёл или соединение не удалось. Попробуй ещё раз или напиши нам.",
         kb([("Тарифы", "go:plans")], [("Поддержка", "go:support")]))
+
+def promo_prompt(u):
+    return ("12_promo.png", "<b>Промокод</b>\n\nПришли код одним сообщением, и бонусные дни добавятся к подписке.",
+        kb([("Назад", "go:start")]))
+
+def promo_ok(u, days, until):
+    return ("13_promo_ok.png", f"<b>Промокод активирован</b>\n\nНачислено: +{days} дн.\nПодписка активна до {d(until)}.",
+        kb([("Подключиться", "go:connect")], [("Профиль", "go:profile")]))
+
+def promo_bad(u, reason):
+    t = {"not_found": ("Код не найден", "Проверь, нет ли опечатки, и попробуй ещё раз."),
+         "already": ("Код уже использован", "Этот промокод можно применить только один раз на аккаунт."),
+         "exhausted": ("Промокод закончился", "У этого кода не осталось активаций.")}[reason]
+    return ("11_error.png", f"<b>{t[0]}</b>\n\n{t[1]}", kb([("Ввести ещё раз", "promo")], [("Назад", "go:start")]))

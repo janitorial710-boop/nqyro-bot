@@ -1,4 +1,4 @@
-import asyncio, logging, time
+import asyncio, logging, re, time
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -51,7 +51,7 @@ async def cmd_start(m: Message, command: CommandObject):
     if command.args and command.args.startswith("ref_"):
         try: ref = int(command.args[4:])
         except ValueError: pass
-    db.get_user(m.from_user.id, ref)
+    WAIT_PROMO.discard(m.from_user.id); db.get_user(m.from_user.id, ref)
     await show(m, await screen_for("start", m.from_user.id))
 
 @dp.message(Command("connect", "plans", "profile", "friends", "support"))
@@ -64,6 +64,7 @@ async def cmd_help(m: Message):
 
 @dp.callback_query(F.data.startswith("go:"))
 async def cb_go(c: CallbackQuery):
+    WAIT_PROMO.discard(c.from_user.id)
     await show(c, await screen_for(c.data[3:], c.from_user.id)); await c.answer()
 
 @dp.callback_query(F.data == "trial")
@@ -81,15 +82,79 @@ async def cb_trial(c: CallbackQuery):
 async def cb_buy(c: CallbackQuery):
     await show(c, screens.payment(db.get_user(c.from_user.id), c.data[4:])); await c.answer()
 
+WAIT_EMAIL = {}   # user_id -> (plan, method): ждём email для чека
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+async def finalize_if_paid(pid):
+    """Проверяет платёж в ЮKassa. True, если платёж завершён (оплачен или отменён)."""
+    p = db.get_payment(pid)
+    if p is None: return True
+    if p["status"] == "paid": return True
+    if not p["yk_id"]: return False
+    try:
+        st = await payments.status(p["yk_id"])
+    except Exception:
+        logging.exception("status check failed"); return False
+    if st == "succeeded":
+        res = db.complete_payment(pid)
+        if res:
+            uid, plan, until = res
+            await panel.set_expiry(uid, until)
+            name, text, markup = screens.success(db.get_user(uid), until)
+            msg = await bot.send_photo(uid, photo(name), caption=text, reply_markup=markup)
+            remember(name, msg)
+        return True
+    if st == "canceled":
+        db.cancel_payment(pid)
+        name, text, markup = screens.error(db.get_user(p["user_id"]))
+        await bot.send_photo(p["user_id"], photo(name), caption=text, reply_markup=markup)
+        return True
+    return False
+
+async def watch(pid):
+    """Опрашивает ЮKassa каждые 5 секунд до 20 минут (вебхук не нужен)."""
+    end = time.time() + 20 * 60
+    while time.time() < end:
+        await asyncio.sleep(5)
+        if await finalize_if_paid(pid): return
+
+async def start_payment(target, uid, plan, method):
+    u = db.get_user(uid)
+    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not u["email"]:
+        WAIT_EMAIL[uid] = (plan, method)
+        msg = target.message if isinstance(target, CallbackQuery) else target
+        await msg.answer("Пришли свой email. На него придёт чек об оплате.")
+        return
+    try:
+        pid, url = await payments.create_invoice(uid, plan, method, u["email"])
+    except Exception:
+        logging.exception("invoice failed"); await show(target, screens.error(u)); return
+    if url is None:
+        await show(target, screens.pay_dev(u, pid))
+    else:
+        asyncio.create_task(watch(pid))
+        await show(target, screens.pay_link(u, url, pid))
+
 @dp.callback_query(F.data.startswith("pay:"))
 async def cb_pay(c: CallbackQuery):
     _, plan, method = c.data.split(":")
-    u = db.get_user(c.from_user.id)
-    try:
-        pid, url = await payments.create_invoice(c.from_user.id, plan, method)
-    except Exception:
-        logging.exception("invoice failed"); await show(c, screens.error(u)); return await c.answer()
-    await show(c, screens.pay_dev(u, pid) if url is None else screens.pay_link(u, url)); await c.answer()
+    await start_payment(c, c.from_user.id, plan, method); await c.answer()
+
+@dp.callback_query(F.data.startswith("chk:"))
+async def cb_chk(c: CallbackQuery):
+    if await finalize_if_paid(int(c.data[4:])):
+        await c.answer()
+    else:
+        await c.answer("Оплата пока не найдена. Подожди минуту и нажми снова.", show_alert=True)
+
+@dp.message(F.text, lambda m: m.from_user.id in WAIT_EMAIL)
+async def got_email(m: Message):
+    email = m.text.strip()
+    if not EMAIL_RE.match(email):
+        return await m.answer("Не похоже на email. Пришли адрес вида name@mail.ru")
+    db.set_email(m.from_user.id, email)
+    plan, method = WAIT_EMAIL.pop(m.from_user.id)
+    await start_payment(m, m.from_user.id, plan, method)
 
 @dp.callback_query(F.data.startswith("devpay:"))
 async def cb_devpay(c: CallbackQuery):
@@ -101,6 +166,49 @@ async def cb_devpay(c: CallbackQuery):
         await panel.set_expiry(uid, until)
         await show(c, screens.success(db.get_user(uid), until))
     await c.answer()
+
+WAIT_PROMO = set()   # пользователи, от которых ждём промокод
+
+def is_admin(m: Message): return m.from_user.id in config.ADMIN_IDS
+
+@dp.message(Command("promo"))
+async def cmd_promo(m: Message):
+    WAIT_PROMO.add(m.from_user.id)
+    await show(m, screens.promo_prompt(db.get_user(m.from_user.id)))
+
+@dp.callback_query(F.data == "promo")
+async def cb_promo(c: CallbackQuery):
+    WAIT_PROMO.add(c.from_user.id)
+    await show(c, screens.promo_prompt(db.get_user(c.from_user.id))); await c.answer()
+
+@dp.message(F.text, lambda m: m.from_user.id in WAIT_PROMO and not m.text.startswith("/"))
+async def got_promo(m: Message):
+    uid = m.from_user.id; WAIT_PROMO.discard(uid)
+    status, days, until = db.use_promo(uid, m.text)
+    u = db.get_user(uid)
+    if status == "ok":
+        await panel.set_expiry(uid, until); await show(m, screens.promo_ok(u, days, until))
+    else:
+        await show(m, screens.promo_bad(u, status))
+
+@dp.message(Command("newpromo"), is_admin)
+async def cmd_newpromo(m: Message, command: CommandObject):
+    try:
+        a = command.args.split(); code, days = a[0], int(a[1]); uses = int(a[2]) if len(a) > 2 else 0
+    except Exception:
+        return await m.answer("Формат: /newpromo КОД ДНИ [МАКС_АКТИВАЦИЙ]\nПример: /newpromo WELCOME 7 100")
+    db.create_promo(code, days, uses)
+    await m.answer(f"Готово: {code.upper()} даёт +{days} дн." + (f", максимум {uses} активаций." if uses else ", без лимита."))
+
+@dp.message(Command("delpromo"), is_admin)
+async def cmd_delpromo(m: Message, command: CommandObject):
+    ok = command.args and db.delete_promo(command.args.strip())
+    await m.answer("Удалён." if ok else "Не найден. Формат: /delpromo КОД")
+
+@dp.message(Command("promos"), is_admin)
+async def cmd_promos(m: Message):
+    rows = db.list_promos()
+    await m.answer("\n".join(f"{r['code']}: +{r['days']} дн., использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") for r in rows) or "Промокодов нет. Создай: /newpromo КОД ДНИ")
 
 @dp.callback_query(F.data == "later")
 async def cb_later(c: CallbackQuery):
@@ -129,8 +237,11 @@ async def main():
         BotCommand(command="plans", description="Тарифы"),
         BotCommand(command="profile", description="Профиль"),
         BotCommand(command="friends", description="Пригласить друга"),
+        BotCommand(command="promo", description="Ввести промокод"),
         BotCommand(command="support", description="Поддержка")])
     asyncio.create_task(reminders())
+    for p in db.pending_payments():
+        asyncio.create_task(watch(p['id']))
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
