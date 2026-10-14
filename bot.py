@@ -200,6 +200,27 @@ async def cmd_newpromo(m: Message, command: CommandObject):
     db.create_promo(code, days, uses)
     await m.answer(f"Готово: {code.upper()} даёт +{days} дн." + (f", максимум {uses} активаций." if uses else ", без лимита."))
 
+@dp.message(Command("genpromo"), is_admin)
+async def cmd_genpromo(m: Message, command: CommandObject):
+    """Создаёт пачку одноразовых кодов: /genpromo ДНИ КОЛИЧЕСТВО [ПРЕФИКС]"""
+    try:
+        a = command.args.split(); days, n = int(a[0]), int(a[1]); prefix = a[2].upper() if len(a) > 2 else "NQ"
+        assert 1 <= n <= 200 and days > 0
+    except Exception:
+        return await m.answer("Формат: /genpromo ДНИ КОЛИЧЕСТВО [ПРЕФИКС]\nПример: /genpromo 7 50 NQ\n(до 200 кодов за раз)")
+    import secrets
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    codes = []
+    while len(codes) < n:
+        code = f"{prefix}-" + "".join(secrets.choice(alphabet) for _ in range(8))
+        if code not in codes:
+            codes.append(code)
+    for code in codes:
+        db.create_promo(code, days, 1)
+    text = f"Создано {n} одноразовых кодов по +{days} дн.:\n\n" + "\n".join(codes)
+    for i in range(0, len(text), 3500):
+        await m.answer(text[i:i + 3500])
+
 @dp.message(Command("delpromo"), is_admin)
 async def cmd_delpromo(m: Message, command: CommandObject):
     ok = command.args and db.delete_promo(command.args.strip())
