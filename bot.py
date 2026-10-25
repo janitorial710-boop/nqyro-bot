@@ -269,6 +269,45 @@ async def cmd_promos(m: Message):
     rows = db.list_promos()
     await m.answer("\n".join(f"{r['code']}: +{r['days']} дн., использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") for r in rows) or "Промокодов нет. Создай: /newpromo КОД ДНИ")
 
+@dp.message(Command("stats"), is_admin)
+async def cmd_stats(m: Message):
+    s = db.stats()
+    await m.answer(
+        "<b>Статистика</b>\n\n"
+        f"Всего пользователей: {s['users']}\n"
+        f"За сутки: +{s['new_day']} · за неделю: +{s['new_week']}\n\n"
+        f"Подписка активна: {s['active']}\n"
+        f"Подписка закончилась: {s['expired']}\n"
+        f"Ни разу не подключались: {s['never']}\n"
+        f"Брали пробник: {s['trial']}\n"
+        f"Пришли по рефералке: {s['refs']}\n"
+        f"Активаций промокодов: {s['promo_uses']}\n\n"
+        f"Оплат деньгами: {s['pay_n']} от {s['payers']} чел. на {s['pay_sum']:.0f} ₽\n"
+        f"Оплат с баланса: {s['bal_sum']:.0f} ₽\n"
+        f"Сумма балансов у пользователей: {s['balances']:.0f} ₽")
+
+@dp.message(Command("users"), is_admin)
+async def cmd_users(m: Message, command: CommandObject):
+    try: page = max(1, int((command.args or "1").strip()))
+    except ValueError: page = 1
+    size = 30
+    total, rows = db.list_users((page - 1) * size, size)
+    if not rows:
+        return await m.answer(f"Пользователей: {total}. На странице {page} пусто.")
+    now = time.time()
+    lines = []
+    for u in rows:
+        if u["sub_until"] > now:
+            st = "до " + time.strftime("%d.%m.%Y", time.localtime(u["sub_until"]))
+        elif u["sub_until"]:
+            st = "истекла " + time.strftime("%d.%m.%Y", time.localtime(u["sub_until"]))
+        else:
+            st = "нет подписки"
+        lines.append(f'<a href="tg://user?id={u["id"]}">{u["id"]}</a> · {st}')
+    pages = (total + size - 1) // size
+    tail = f"\n\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
+    await m.answer(f"<b>Пользователи ({total})</b>\n\n" + "\n".join(lines) + tail)
+
 @dp.callback_query(F.data == "later")
 async def cb_later(c: CallbackQuery):
     await c.answer("Напомним позже"); await c.message.delete()

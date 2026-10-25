@@ -156,3 +156,30 @@ def due_reminders(now, within_days=3):
 
 def mark_reminded(uid, until):
     con.execute("UPDATE users SET reminded_for=? WHERE id=?", (until, uid)); con.commit()
+
+def stats(now=None):
+    """Сводка для админа."""
+    now = now or int(time.time())
+    q = lambda sql, *a: con.execute(sql, a).fetchone()[0] or 0
+    return {
+        "users": q("SELECT COUNT(*) FROM users"),
+        "active": q("SELECT COUNT(*) FROM users WHERE sub_until>?", now),
+        "expired": q("SELECT COUNT(*) FROM users WHERE sub_until>0 AND sub_until<=?", now),
+        "never": q("SELECT COUNT(*) FROM users WHERE sub_until=0"),
+        "trial": q("SELECT COUNT(*) FROM users WHERE trial_used=1"),
+        "payers": q("SELECT COUNT(DISTINCT user_id) FROM payments WHERE status='paid' AND method!='balance'"),
+        "pay_n": q("SELECT COUNT(*) FROM payments WHERE status='paid' AND method!='balance'"),
+        "pay_sum": q("SELECT SUM(amount) FROM payments WHERE status='paid' AND method!='balance'"),
+        "bal_sum": q("SELECT SUM(amount) FROM payments WHERE status='paid' AND method='balance'"),
+        "balances": q("SELECT SUM(COALESCE(balance,0)+COALESCE(topup,0)) FROM users"),
+        "refs": q("SELECT COUNT(*) FROM users WHERE ref IS NOT NULL"),
+        "promo_uses": q("SELECT COUNT(*) FROM promo_uses"),
+        "new_day": q("SELECT COUNT(*) FROM users WHERE created>?", now - 86400),
+        "new_week": q("SELECT COUNT(*) FROM users WHERE created>?", now - 7 * 86400),
+    }
+
+def list_users(offset=0, limit=30):
+    """(всего, строки). Сначала у кого подписка дольше."""
+    total = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    rows = con.execute("SELECT * FROM users ORDER BY sub_until DESC, id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    return total, rows
