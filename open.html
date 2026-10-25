@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>NQYRO: добавить подписку</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b1317;color:#e8f1f4;font-family:-apple-system,system-ui,sans-serif}
+  .c{max-width:380px;padding:24px;text-align:center}
+  a.b{display:block;margin:18px 0 10px;padding:14px;border-radius:12px;background:#2ad4b0;color:#06201a;font-weight:600;text-decoration:none}
+  p{color:#9db3ba;font-size:14px;line-height:1.5}
+  code{display:block;word-break:break-all;background:#142229;border-radius:8px;padding:10px;font-size:12px;color:#cfe3e8}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<div class="c">
+  <h2 id="title">Открываем приложение…</h2>
+  <a class="b hide" id="btn" href="#">Добавить подписку</a>
+  <p id="hint"></p>
+  <code id="sub" class="hide"></code>
+</div>
+<script>
+(function () {
+  // Разрешённый домен ссылки подписки. Поддомены тоже подходят (panel.nqyrovpn.site, sub.nqyrovpn.site).
+  // Если у вас другой домен подписки, замените значение ниже.
+  var ALLOWED_DOMAIN = "nqyrovpn.site";
+
+  var APPS = {
+    happ: { name: "Happ", scheme: "happ://add/" },
+    incy: { name: "Incy",  scheme: "incy://import/" }
+  };
+
+  var q = new URLSearchParams(location.search);
+  var app = APPS[(q.get("app") || "").toLowerCase()];
+  var sub = (q.get("sub") || "").trim();
+  var title = document.getElementById("title");
+  var hint = document.getElementById("hint");
+
+  function fail(msg) {
+    title.textContent = "Не получилось";
+    hint.textContent = msg;
+  }
+
+  if (!app) { return fail("Неизвестное приложение. Вернитесь в бота и нажмите кнопку ещё раз."); }
+
+  var u;
+  try { u = new URL(sub); } catch (e) { return fail("Ссылка подписки не найдена. Вернитесь в бота и нажмите кнопку ещё раз."); }
+  var host = u.hostname.toLowerCase();
+  var okHost = host === ALLOWED_DOMAIN || host.endsWith("." + ALLOWED_DOMAIN);
+  if (u.protocol !== "https:" || !okHost) {
+    return fail("Ссылка подписки с домена " + host + " не разрешена. Если это ваш домен, укажите его в настройках страницы.");
+  }
+
+  var deeplink = app.scheme + sub;
+  var btn = document.getElementById("btn");
+  btn.href = deeplink;
+  btn.textContent = "Добавить в " + app.name;
+  btn.classList.remove("hide");
+  title.textContent = "Открываем " + app.name + "…";
+  hint.textContent = "Если приложение не открылось, нажмите кнопку. Приложение " + app.name + " должно быть установлено. Или скопируйте ссылку и добавьте вручную:";
+  var code = document.getElementById("sub");
+  code.textContent = sub;
+  code.classList.remove("hide");
+
+  setTimeout(function () { location.href = deeplink; }, 300);
+})();
+</script>
+</body>
+</html>
