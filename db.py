@@ -12,11 +12,16 @@ CREATE TABLE IF NOT EXISTS payments(
   method TEXT, status TEXT, created INTEGER);
 """)
 
-for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT"):
+for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT",
+             "ALTER TABLE users ADD COLUMN topup REAL DEFAULT 0",        # основной баланс (пополняет админ)
+             "ALTER TABLE users ADD COLUMN ref_earned REAL DEFAULT 0"):  # всего заработано на рефералах
     try:
         con.execute(_sql); con.commit()
     except sqlite3.OperationalError:
         pass
+
+# для старых записей: «заработано» = текущий реферальный баланс (один раз)
+con.execute("UPDATE users SET ref_earned=balance WHERE ref_earned=0 AND balance>0"); con.commit()
 
 con.executescript("""
 CREATE TABLE IF NOT EXISTS promo_codes(
@@ -102,13 +107,48 @@ def complete_payment(pid):
     until = extend(p["user_id"], config.PLANS[p["plan"]][1])
     u = get_user(p["user_id"])
     if u["ref"]:
-        con.execute("UPDATE users SET balance=balance+? WHERE id=?",
-                    (p["amount"] * config.REF_PERCENT / 100, u["ref"])); con.commit()
+        bonus = p["amount"] * config.REF_PERCENT / 100
+        con.execute("UPDATE users SET balance=balance+?, ref_earned=ref_earned+? WHERE id=?",
+                    (bonus, bonus, u["ref"])); con.commit()
     return p["user_id"], p["plan"], until
 
 def friends_stats(uid):
+    """(приглашено, всего заработано, текущий реферальный баланс)"""
     n = con.execute("SELECT COUNT(*) c FROM users WHERE ref=?", (uid,)).fetchone()["c"]
-    return n, get_user(uid)["balance"]
+    u = get_user(uid)
+    return n, u["ref_earned"], u["balance"]
+
+def total_balance(u):
+    return round((u["balance"] or 0) + (u["topup"] or 0), 2)
+
+def add_balance(uid, amount, kind):
+    """kind: 'main' (основной) или 'ref' (реферальный). amount может быть отрицательным.
+    Баланс не уходит ниже нуля. Возвращает обновлённую строку пользователя."""
+    get_user(uid)
+    col = "topup" if kind == "main" else "balance"
+    con.execute(f"UPDATE users SET {col}=MAX(0, COALESCE({col},0)+?) WHERE id=?", (amount, uid))
+    if kind == "ref" and amount > 0:
+        con.execute("UPDATE users SET ref_earned=ref_earned+? WHERE id=?", (amount, uid))
+    con.commit()
+    return get_user(uid)
+
+def pay_with_balance(uid, plan):
+    """Оплата тарифа с баланса: сначала реферальный, потом основной.
+    Возвращает дату окончания подписки или None, если денег не хватает."""
+    price, days, _ = config.PLANS[plan]
+    u = get_user(uid)
+    if total_balance(u) < price:
+        return None
+    from_ref = min(u["balance"] or 0, price)
+    from_main = price - from_ref
+    cur = con.execute("UPDATE users SET balance=balance-?, topup=topup-? WHERE id=? AND balance>=? AND topup>=?",
+                      (from_ref, from_main, uid, from_ref, from_main - 1e-9))
+    if cur.rowcount == 0:
+        con.rollback(); return None
+    con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created) VALUES(?,?,?,?,?,?)",
+                (uid, plan, price, "balance", "paid", int(time.time())))
+    con.commit()
+    return extend(uid, days)
 
 def due_reminders(now, within_days=3):
     return con.execute("SELECT * FROM users WHERE sub_until>? AND sub_until<? AND reminded_for!=sub_until",

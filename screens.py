@@ -49,8 +49,15 @@ def plans(u):
 
 def payment(u, plan):
     price, _, name = config.PLANS[plan]
-    return ("05_payment.png", f"<b>Оплата</b>\n\nТариф: {name}\nК оплате: {price} ₽\n\nВыбери способ оплаты.",
-        kb([("СБП", f"pay:{plan}:sbp")], [("Банковская карта", f"pay:{plan}:card")],
+    bal = db.total_balance(u)
+    rows = []
+    bal_line = ""
+    if bal > 0:
+        bal_line = f"\nНа балансе: {bal:.0f} ₽"
+        label = f"Оплатить балансом · {bal:.0f} ₽" if bal >= price else f"Баланс · {bal:.0f} ₽ (не хватает {price - bal:.0f} ₽)"
+        rows.append([(label, f"paybal:{plan}")])
+    return ("05_payment.png", f"<b>Оплата</b>\n\nТариф: {name}\nК оплате: {price} ₽{bal_line}\n\nВыбери способ оплаты.",
+        kb(*rows, [("СБП", f"pay:{plan}:sbp")], [("Банковская карта", f"pay:{plan}:card")],
            [("Другие способы", f"pay:{plan}:any")], [("Назад", "go:plans")]))
 
 def pay_dev(u, pid):
@@ -69,17 +76,19 @@ def profile(u):
     import time
     active = u["sub_until"] > time.time()
     text = (f"<b>Профиль</b>\n\nСтатус: {'активна' if active else 'не активна'}\n"
-            f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3")
+            f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3\n"
+            f"Баланс: {db.total_balance(u):.0f} ₽")
     return ("07_profile.png", text,
         kb([("Продлить", "go:plans")], [("Подключиться", "go:connect"), ("Промокод", "promo")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
 
 def friends(u):
-    n, bal = db.friends_stats(u["id"])
+    n, earned, bal = db.friends_stats(u["id"])
     link = f"https://t.me/{config.BOT_USERNAME}?start=ref_{u['id']}"
     return ("08_friends.png",
         f"<b>Приглашай друзей</b>\n\nДруг получает 5 дней бесплатно, а ты {config.REF_PERCENT}% с каждой его оплаты на свой баланс.\n\n"
-        f"Приглашено: {n} · Заработано: {bal:.0f} ₽\n\nТвоя ссылка:\n<code>{link}</code>",
-        kb([("Назад", "go:start")]))
+        f"Приглашено: {n} · Заработано: {earned:.0f} ₽\nНа реферальном балансе: {bal:.0f} ₽\n"
+        f"Им можно оплатить подписку.\n\nТвоя ссылка:\n<code>{link}</code>",
+        kb([("Оплатить подписку балансом", "go:plans")], [("Назад", "go:start")]))
 
 def expiring(u):
     return ("09_expiring.png", "<b>Подписка заканчивается через 3 дня</b>\n\nПродли сейчас, и доступ не прервётся.",

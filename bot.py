@@ -82,6 +82,21 @@ async def cb_trial(c: CallbackQuery):
 async def cb_buy(c: CallbackQuery):
     await show(c, screens.payment(db.get_user(c.from_user.id), c.data[4:])); await c.answer()
 
+@dp.callback_query(F.data.startswith("paybal:"))
+async def cb_paybal(c: CallbackQuery):
+    plan = c.data.split(":")[1]
+    if plan not in config.PLANS:
+        return await c.answer()
+    u = db.get_user(c.from_user.id)
+    price = config.PLANS[plan][0]
+    if db.total_balance(u) < price:
+        return await c.answer(f"Не хватает {price - db.total_balance(u):.0f} ₽. Выбери другой способ оплаты.", show_alert=True)
+    until = db.pay_with_balance(c.from_user.id, plan)
+    if until is None:
+        return await c.answer("Не хватает средств на балансе.", show_alert=True)
+    await panel.set_expiry(c.from_user.id, until)
+    await show(c, screens.success(db.get_user(c.from_user.id), until)); await c.answer("Оплачено с баланса")
+
 WAIT_EMAIL = {}   # user_id -> (plan, method): ждём email для чека
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -220,6 +235,29 @@ async def cmd_genpromo(m: Message, command: CommandObject):
     text = f"Создано {n} одноразовых кодов по +{days} дн.:\n\n" + "\n".join(codes)
     for i in range(0, len(text), 3500):
         await m.answer(text[i:i + 3500])
+
+async def _bal_cmd(m: Message, command: CommandObject, kind: str, usage: str):
+    try:
+        a = command.args.split(); uid, amount = int(a[0]), float(a[1].replace(",", "."))
+    except Exception:
+        return await m.answer(usage)
+    u = db.add_balance(uid, amount, kind)
+    await m.answer(f"Готово. Пользователь {uid}:\nОсновной баланс: {u['topup']:.0f} ₽\nРеферальный баланс: {u['balance']:.0f} ₽\nВсего: {db.total_balance(u):.0f} ₽")
+
+@dp.message(Command("addbal"), is_admin)
+async def cmd_addbal(m: Message, command: CommandObject):
+    await _bal_cmd(m, command, "main", "Формат: /addbal ID_ПОЛЬЗОВАТЕЛЯ СУММА\nПример: /addbal 123456789 500\n(минус в сумме списывает)")
+
+@dp.message(Command("addref"), is_admin)
+async def cmd_addref(m: Message, command: CommandObject):
+    await _bal_cmd(m, command, "ref", "Формат: /addref ID_ПОЛЬЗОВАТЕЛЯ СУММА\nПример: /addref 123456789 300\n(минус в сумме списывает)")
+
+@dp.message(Command("balance"), is_admin)
+async def cmd_balance(m: Message, command: CommandObject):
+    try: uid = int(command.args.strip())
+    except Exception: uid = m.from_user.id
+    u = db.get_user(uid)
+    await m.answer(f"Пользователь {uid}:\nОсновной баланс: {u['topup']:.0f} ₽\nРеферальный баланс: {u['balance']:.0f} ₽\nВсего: {db.total_balance(u):.0f} ₽")
 
 @dp.message(Command("delpromo"), is_admin)
 async def cmd_delpromo(m: Message, command: CommandObject):

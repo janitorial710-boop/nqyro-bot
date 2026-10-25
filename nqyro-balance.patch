@@ -1,0 +1,177 @@
+diff --git a/bot.py b/bot.py
+index 94b197b..19a403e 100644
+--- a/bot.py
++++ b/bot.py
+@@ -82,6 +82,21 @@ async def cb_trial(c: CallbackQuery):
+ async def cb_buy(c: CallbackQuery):
+     await show(c, screens.payment(db.get_user(c.from_user.id), c.data[4:])); await c.answer()
+ 
++@dp.callback_query(F.data.startswith("paybal:"))
++async def cb_paybal(c: CallbackQuery):
++    plan = c.data.split(":")[1]
++    if plan not in config.PLANS:
++        return await c.answer()
++    u = db.get_user(c.from_user.id)
++    price = config.PLANS[plan][0]
++    if db.total_balance(u) < price:
++        return await c.answer(f"Не хватает {price - db.total_balance(u):.0f} ₽. Выбери другой способ оплаты.", show_alert=True)
++    until = db.pay_with_balance(c.from_user.id, plan)
++    if until is None:
++        return await c.answer("Не хватает средств на балансе.", show_alert=True)
++    await panel.set_expiry(c.from_user.id, until)
++    await show(c, screens.success(db.get_user(c.from_user.id), until)); await c.answer("Оплачено с баланса")
++
+ WAIT_EMAIL = {}   # user_id -> (plan, method): ждём email для чека
+ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+ 
+@@ -221,6 +236,29 @@ async def cmd_genpromo(m: Message, command: CommandObject):
+     for i in range(0, len(text), 3500):
+         await m.answer(text[i:i + 3500])
+ 
++async def _bal_cmd(m: Message, command: CommandObject, kind: str, usage: str):
++    try:
++        a = command.args.split(); uid, amount = int(a[0]), float(a[1].replace(",", "."))
++    except Exception:
++        return await m.answer(usage)
++    u = db.add_balance(uid, amount, kind)
++    await m.answer(f"Готово. Пользователь {uid}:\nОсновной баланс: {u['topup']:.0f} ₽\nРеферальный баланс: {u['balance']:.0f} ₽\nВсего: {db.total_balance(u):.0f} ₽")
++
++@dp.message(Command("addbal"), is_admin)
++async def cmd_addbal(m: Message, command: CommandObject):
++    await _bal_cmd(m, command, "main", "Формат: /addbal ID_ПОЛЬЗОВАТЕЛЯ СУММА\nПример: /addbal 123456789 500\n(минус в сумме списывает)")
++
++@dp.message(Command("addref"), is_admin)
++async def cmd_addref(m: Message, command: CommandObject):
++    await _bal_cmd(m, command, "ref", "Формат: /addref ID_ПОЛЬЗОВАТЕЛЯ СУММА\nПример: /addref 123456789 300\n(минус в сумме списывает)")
++
++@dp.message(Command("balance"), is_admin)
++async def cmd_balance(m: Message, command: CommandObject):
++    try: uid = int(command.args.strip())
++    except Exception: uid = m.from_user.id
++    u = db.get_user(uid)
++    await m.answer(f"Пользователь {uid}:\nОсновной баланс: {u['topup']:.0f} ₽\nРеферальный баланс: {u['balance']:.0f} ₽\nВсего: {db.total_balance(u):.0f} ₽")
++
+ @dp.message(Command("delpromo"), is_admin)
+ async def cmd_delpromo(m: Message, command: CommandObject):
+     ok = command.args and db.delete_promo(command.args.strip())
+diff --git a/db.py b/db.py
+index 4643e99..0dc15fa 100644
+--- a/db.py
++++ b/db.py
+@@ -12,12 +12,17 @@ CREATE TABLE IF NOT EXISTS payments(
+   method TEXT, status TEXT, created INTEGER);
+ """)
+ 
+-for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT"):
++for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT",
++             "ALTER TABLE users ADD COLUMN topup REAL DEFAULT 0",        # основной баланс (пополняет админ)
++             "ALTER TABLE users ADD COLUMN ref_earned REAL DEFAULT 0"):  # всего заработано на рефералах
+     try:
+         con.execute(_sql); con.commit()
+     except sqlite3.OperationalError:
+         pass
+ 
++# для старых записей: «заработано» = текущий реферальный баланс (один раз)
++con.execute("UPDATE users SET ref_earned=balance WHERE ref_earned=0 AND balance>0"); con.commit()
++
+ con.executescript("""
+ CREATE TABLE IF NOT EXISTS promo_codes(
+   code TEXT PRIMARY KEY, days INTEGER, max_uses INTEGER DEFAULT 0, used INTEGER DEFAULT 0, created INTEGER);
+@@ -102,13 +107,48 @@ def complete_payment(pid):
+     until = extend(p["user_id"], config.PLANS[p["plan"]][1])
+     u = get_user(p["user_id"])
+     if u["ref"]:
+-        con.execute("UPDATE users SET balance=balance+? WHERE id=?",
+-                    (p["amount"] * config.REF_PERCENT / 100, u["ref"])); con.commit()
++        bonus = p["amount"] * config.REF_PERCENT / 100
++        con.execute("UPDATE users SET balance=balance+?, ref_earned=ref_earned+? WHERE id=?",
++                    (bonus, bonus, u["ref"])); con.commit()
+     return p["user_id"], p["plan"], until
+ 
+ def friends_stats(uid):
++    """(приглашено, всего заработано, текущий реферальный баланс)"""
+     n = con.execute("SELECT COUNT(*) c FROM users WHERE ref=?", (uid,)).fetchone()["c"]
+-    return n, get_user(uid)["balance"]
++    u = get_user(uid)
++    return n, u["ref_earned"], u["balance"]
++
++def total_balance(u):
++    return round((u["balance"] or 0) + (u["topup"] or 0), 2)
++
++def add_balance(uid, amount, kind):
++    """kind: 'main' (основной) или 'ref' (реферальный). amount может быть отрицательным.
++    Баланс не уходит ниже нуля. Возвращает обновлённую строку пользователя."""
++    get_user(uid)
++    col = "topup" if kind == "main" else "balance"
++    con.execute(f"UPDATE users SET {col}=MAX(0, COALESCE({col},0)+?) WHERE id=?", (amount, uid))
++    if kind == "ref" and amount > 0:
++        con.execute("UPDATE users SET ref_earned=ref_earned+? WHERE id=?", (amount, uid))
++    con.commit()
++    return get_user(uid)
++
++def pay_with_balance(uid, plan):
++    """Оплата тарифа с баланса: сначала реферальный, потом основной.
++    Возвращает дату окончания подписки или None, если денег не хватает."""
++    price, days, _ = config.PLANS[plan]
++    u = get_user(uid)
++    if total_balance(u) < price:
++        return None
++    from_ref = min(u["balance"] or 0, price)
++    from_main = price - from_ref
++    cur = con.execute("UPDATE users SET balance=balance-?, topup=topup-? WHERE id=? AND balance>=? AND topup>=?",
++                      (from_ref, from_main, uid, from_ref, from_main - 1e-9))
++    if cur.rowcount == 0:
++        con.rollback(); return None
++    con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created) VALUES(?,?,?,?,?,?)",
++                (uid, plan, price, "balance", "paid", int(time.time())))
++    con.commit()
++    return extend(uid, days)
+ 
+ def due_reminders(now, within_days=3):
+     return con.execute("SELECT * FROM users WHERE sub_until>? AND sub_until<? AND reminded_for!=sub_until",
+diff --git a/screens.py b/screens.py
+index 5994856..c6b3ed7 100644
+--- a/screens.py
++++ b/screens.py
+@@ -49,8 +49,15 @@ def plans(u):
+ 
+ def payment(u, plan):
+     price, _, name = config.PLANS[plan]
+-    return ("05_payment.png", f"<b>Оплата</b>\n\nТариф: {name}\nК оплате: {price} ₽\n\nВыбери способ оплаты.",
+-        kb([("СБП", f"pay:{plan}:sbp")], [("Банковская карта", f"pay:{plan}:card")],
++    bal = db.total_balance(u)
++    rows = []
++    bal_line = ""
++    if bal > 0:
++        bal_line = f"\nНа балансе: {bal:.0f} ₽"
++        label = f"Оплатить балансом · {bal:.0f} ₽" if bal >= price else f"Баланс · {bal:.0f} ₽ (не хватает {price - bal:.0f} ₽)"
++        rows.append([(label, f"paybal:{plan}")])
++    return ("05_payment.png", f"<b>Оплата</b>\n\nТариф: {name}\nК оплате: {price} ₽{bal_line}\n\nВыбери способ оплаты.",
++        kb(*rows, [("СБП", f"pay:{plan}:sbp")], [("Банковская карта", f"pay:{plan}:card")],
+            [("Другие способы", f"pay:{plan}:any")], [("Назад", "go:plans")]))
+ 
+ def pay_dev(u, pid):
+@@ -69,17 +76,19 @@ def profile(u):
+     import time
+     active = u["sub_until"] > time.time()
+     text = (f"<b>Профиль</b>\n\nСтатус: {'активна' if active else 'не активна'}\n"
+-            f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3")
++            f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3\n"
++            f"Баланс: {db.total_balance(u):.0f} ₽")
+     return ("07_profile.png", text,
+         kb([("Продлить", "go:plans")], [("Подключиться", "go:connect"), ("Промокод", "promo")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
+ 
+ def friends(u):
+-    n, bal = db.friends_stats(u["id"])
++    n, earned, bal = db.friends_stats(u["id"])
+     link = f"https://t.me/{config.BOT_USERNAME}?start=ref_{u['id']}"
+     return ("08_friends.png",
+         f"<b>Приглашай друзей</b>\n\nДруг получает 5 дней бесплатно, а ты {config.REF_PERCENT}% с каждой его оплаты на свой баланс.\n\n"
+-        f"Приглашено: {n} · Заработано: {bal:.0f} ₽\n\nТвоя ссылка:\n<code>{link}</code>",
+-        kb([("Назад", "go:start")]))
++        f"Приглашено: {n} · Заработано: {earned:.0f} ₽\nНа реферальном балансе: {bal:.0f} ₽\n"
++        f"Им можно оплатить подписку.\n\nТвоя ссылка:\n<code>{link}</code>",
++        kb([("Оплатить подписку балансом", "go:plans")], [("Назад", "go:start")]))
+ 
+ def expiring(u):
+     return ("09_expiring.png", "<b>Подписка заканчивается через 3 дня</b>\n\nПродли сейчас, и доступ не прервётся.",
