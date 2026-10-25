@@ -13,9 +13,11 @@ def kb(*rows):
 def d(ts): return datetime.fromtimestamp(ts).strftime("%d.%m.%Y")
 
 def start(u):
+    used = bool(u["trial_used"])
     return ("01_start.png",
-        "<b>NQYRO (читается «найро»)</b>\n\nVPN, который не бесит. Включил и пользуешься.\n\nНовым пользователям 5 дней бесплатно.",
-        kb([("Попробовать 5 дней", "trial")],
+        "<b>NQYRO (читается «найро»)</b>\n\nVPN, который не бесит. Включил и пользуешься."
+        + ("" if used else "\n\nНовым пользователям 5 дней бесплатно."),
+        kb(*([] if used else [[("Попробовать 5 дней", "trial")]]),
            [("Подключиться", "go:connect"), ("Тарифы", "go:plans")],
            [("Профиль", "go:profile"), ("Друзья", "go:friends")],
            [("Промокод", "promo"), ("Поддержка", "go:support")]))
@@ -30,6 +32,9 @@ def trial(u, ok=True):
 
 def connect(u, sub=None):
     if not sub:
+        if u["trial_used"]:
+            return ("03_connect.png", "<b>Подписка не активна</b>\n\nВыбери тариф, чтобы подключиться.",
+                    kb([("Тарифы", "go:plans")], [("Назад", "go:start")]))
         return ("03_connect.png", "<b>Подписка не активна</b>\n\nПопробуй 5 дней бесплатно или выбери тариф.",
                 kb([("Попробовать 5 дней", "trial")], [("Тарифы", "go:plans")]))
     return ("03_connect.png",
