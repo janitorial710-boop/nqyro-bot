@@ -1,5 +1,5 @@
-import asyncio, logging, re, time
-from aiogram import Bot, Dispatcher, F
+import asyncio, html, logging, re, time
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
@@ -10,6 +10,22 @@ import config, db, panel, payments, redirect, screens
 
 bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+def track(u):
+    """Запоминает имя и @username пользователя (нужно для /users)."""
+    if u is None or u.is_bot: return
+    try:
+        db.touch_user(u.id, u.username or "", ((u.first_name or "") + " " + (u.last_name or "")).strip())
+    except Exception:
+        logging.exception("touch_user")
+
+class Track(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        track(getattr(event, "from_user", None))
+        return await handler(event, data)
+
+dp.message.outer_middleware(Track())
+dp.callback_query.outer_middleware(Track())
 FILE_IDS = {}   # кэш file_id, чтобы не загружать картинки каждый раз
 
 def photo(name):
@@ -51,7 +67,7 @@ async def cmd_start(m: Message, command: CommandObject):
     if command.args and command.args.startswith("ref_"):
         try: ref = int(command.args[4:])
         except ValueError: pass
-    WAIT_PROMO.discard(m.from_user.id); db.get_user(m.from_user.id, ref)
+    WAIT_PROMO.discard(m.from_user.id); db.get_user(m.from_user.id, ref); track(m.from_user)
     await show(m, await screen_for("start", m.from_user.id))
 
 @dp.message(Command("connect", "plans", "profile", "friends", "support"))
@@ -294,6 +310,14 @@ async def cmd_users(m: Message, command: CommandObject):
     total, rows = db.list_users((page - 1) * size, size)
     if not rows:
         return await m.answer(f"Пользователей: {total}. На странице {page} пусто.")
+    # те, кого бот ещё не «видел», подтягиваем из Telegram один раз
+    for uid in db.users_without_profile([r["id"] for r in rows]):
+        try:
+            ch = await bot.get_chat(uid)
+            db.touch_user(uid, ch.username or "", ((ch.first_name or "") + " " + (ch.last_name or "")).strip() or "(без имени)")
+        except Exception:
+            db.touch_user(uid, "", "(профиль недоступен)")
+    total, rows = db.list_users((page - 1) * size, size)
     now = time.time()
     lines = []
     for u in rows:
@@ -303,10 +327,13 @@ async def cmd_users(m: Message, command: CommandObject):
             st = "истекла " + time.strftime("%d.%m.%Y", time.localtime(u["sub_until"]))
         else:
             st = "нет подписки"
-        lines.append(f'<a href="tg://user?id={u["id"]}">{u["id"]}</a> · {st}')
+        name = html.escape(u["name"] or "") or "без имени"
+        link = f'https://t.me/{u["username"]}' if u["username"] else f'tg://user?id={u["id"]}'
+        who = f'<a href="{link}">{name}</a>' + (f' @{html.escape(u["username"])}' if u["username"] else "")
+        lines.append(f'{who} · <code>{u["id"]}</code> · {st}')
     pages = (total + size - 1) // size
     tail = f"\n\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
-    await m.answer(f"<b>Пользователи ({total})</b>\n\n" + "\n".join(lines) + tail)
+    await m.answer(f"<b>Пользователи ({total})</b>\n\n" + "\n".join(lines) + tail, disable_web_page_preview=True)
 
 @dp.callback_query(F.data == "later")
 async def cb_later(c: CallbackQuery):

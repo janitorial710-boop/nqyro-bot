@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS payments(
 
 for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT",
              "ALTER TABLE users ADD COLUMN topup REAL DEFAULT 0",        # основной баланс (пополняет админ)
-             "ALTER TABLE users ADD COLUMN ref_earned REAL DEFAULT 0"):  # всего заработано на рефералах
+             "ALTER TABLE users ADD COLUMN ref_earned REAL DEFAULT 0",   # всего заработано на рефералах
+             "ALTER TABLE users ADD COLUMN username TEXT",               # @username в Telegram
+             "ALTER TABLE users ADD COLUMN name TEXT"):                  # имя и фамилия в Telegram
     try:
         con.execute(_sql); con.commit()
     except sqlite3.OperationalError:
@@ -183,3 +185,15 @@ def list_users(offset=0, limit=30):
     total = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     rows = con.execute("SELECT * FROM users ORDER BY sub_until DESC, id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
     return total, rows
+
+def touch_user(uid, username, name):
+    """Запоминает имя и @username. Не создаёт пользователя (его создаёт get_user, чтобы не потерять реферала)."""
+    con.execute("UPDATE users SET username=?, name=? WHERE id=? AND (COALESCE(username,'')!=? OR COALESCE(name,'')!=?)",
+                (username, name, uid, username, name)); con.commit()
+
+def users_without_profile(ids):
+    """Из списка ID оставляет тех, чьё имя ещё не известно."""
+    if not ids: return []
+    q = ",".join("?" * len(ids))
+    rows = con.execute(f"SELECT id FROM users WHERE id IN ({q}) AND name IS NULL AND username IS NULL", ids).fetchall()
+    return [r["id"] for r in rows]
