@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
-import config, db, panel, payments, screens
+import config, db, panel, payments, redirect, screens
 
 bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -298,6 +298,7 @@ async def main():
         BotCommand(command="friends", description="Пригласить друга"),
         BotCommand(command="promo", description="Ввести промокод"),
         BotCommand(command="support", description="Поддержка")])
+    await redirect.start_server()
     asyncio.create_task(reminders())
     for p in db.pending_payments():
         asyncio.create_task(watch(p['id']))

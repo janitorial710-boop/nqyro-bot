@@ -7,7 +7,12 @@ SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "nqyro_support").lstrip("@")
 DB_PATH = os.getenv("DB_PATH", "data.db")
 DEV_PAY = os.getenv("DEV_PAY", "1") == "1"   # 1 = тестовая оплата без платёжного сервиса
 SUB_BASE = os.getenv("SUB_BASE", "https://sub.example.com/sub")
-OPEN_URL = os.getenv("OPEN_URL", "")   # шаблон https://.../{app}?sub={sub}; пусто = кнопок «Добавить в …» не будет
+OPEN_BASE = os.getenv("OPEN_BASE", "").rstrip("/")   # публичный https-адрес бота, например https://bot.nqyrovpn.site
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")        # на каком адресе слушает встроенная страница-редирект
+WEB_PORT = int(os.getenv("WEB_PORT", "0"))            # 0 = страница выключена
+SUB_HOSTS = {x for x in os.getenv("SUB_HOSTS", "").replace(" ", "").split(",") if x}   # разрешённые домены подписки (кроме домена панели)
+# шаблон https://.../{app}?sub={sub}; по умолчанию собирается из OPEN_BASE; пусто = кнопок «Добавить в …» не будет
+OPEN_URL = os.getenv("OPEN_URL", "") or (f"{OPEN_BASE}/open/{{app}}?sub={{sub}}" if OPEN_BASE else "")
 HAPP_URL = os.getenv("HAPP_URL", "https://www.happ.su")
 INCY_URL = os.getenv("INCY_URL", "https://incy.cc")
 TRIAL_DAYS = 5
