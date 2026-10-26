@@ -201,6 +201,7 @@ async def cb_devpay(c: CallbackQuery):
 WAIT_PROMO = set()   # пользователи, от которых ждём промокод
 
 def is_admin(m: Message): return m.from_user.id in config.ADMIN_IDS
+def can_stats(m: Message): return m.from_user.id in config.ADMIN_IDS or m.from_user.id in config.STATS_IDS
 
 @dp.message(Command("promo"))
 async def cmd_promo(m: Message):
@@ -285,7 +286,7 @@ async def cmd_promos(m: Message):
     rows = db.list_promos()
     await m.answer("\n".join(f"{r['code']}: +{r['days']} дн., использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") for r in rows) or "Промокодов нет. Создай: /newpromo КОД ДНИ")
 
-@dp.message(Command("stats"), is_admin)
+@dp.message(Command("stats"), can_stats)
 async def cmd_stats(m: Message):
     s = db.stats()
     await m.answer(

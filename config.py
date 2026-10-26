@@ -30,6 +30,7 @@ if not DEV_PAY and not (YK_SHOP_ID and YK_SECRET):
     raise RuntimeError("Задай YK_SHOP_ID и YK_SECRET или включи DEV_PAY=1")
 
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # только числовые ID
+STATS_IDS = {int(x) for x in os.getenv("STATS_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # видят только /stats
 
 # --- Панель Remnawave ---
 PANEL_URL = os.getenv("PANEL_URL", "")        # например https://panel.example.com
