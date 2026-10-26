@@ -53,14 +53,23 @@ async def _create(uid: int, until_ts: int):
     return data
 
 async def _sync(uid: int, until_ts: int):
-    """Создаёт пользователя или выставляет ему дату окончания и статус. Возвращает объект пользователя."""
+    """Создаёт пользователя или выставляет ему дату окончания и статус. Возвращает объект пользователя.
+    Заблокированный админом (/ban) остаётся в статусе DISABLED, пока его не разблокируют."""
+    banned = db.is_banned(uid)
     u = await _find(uid)
     if u is None:
+        if banned:
+            return None
         return await _create(uid, until_ts)
     active = until_ts > time.time()
+    want = "DISABLED" if banned else ("ACTIVE" if active else "EXPIRED")
     cur = _parse_iso(u["expireAt"]) if u.get("expireAt") else 0
-    if abs(cur - until_ts) > 60 or (active and u.get("status") != "ACTIVE"):
-        body = {"uuid": u["uuid"], "expireAt": _iso(until_ts), "status": "ACTIVE" if active else "EXPIRED"}
+    st_now = u.get("status")
+    need = (abs(cur - until_ts) > 60
+            or (want in ("ACTIVE", "DISABLED") and st_now != want)
+            or (want == "EXPIRED" and st_now == "DISABLED"))
+    if need:
+        body = {"uuid": u["uuid"], "expireAt": _iso(until_ts), "status": want}
         st, data = await _call("PATCH", "/api/users", json=body)
         if st >= 300:
             raise RuntimeError(f"panel update {st}: {data}")
@@ -83,3 +92,17 @@ async def set_expiry(uid: int, until_ts: int) -> None:
         await _sync(uid, until_ts)
     except Exception:
         logging.exception("panel set_expiry failed (uid=%s)", uid)
+
+async def set_banned(uid: int) -> None:
+    """Применяет в панели текущее состояние блокировки из базы (флаг banned уже выставлен). Бросает исключение при сбое."""
+    await _sync(uid, db.get_user(uid)["sub_until"])
+
+async def get_info(uid: int):
+    """Объект пользователя из панели или None (для /user)."""
+    if not config.PANEL_URL:
+        return None
+    try:
+        return await _find(uid)
+    except Exception:
+        logging.exception("panel get_info failed")
+        return None

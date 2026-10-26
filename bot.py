@@ -1,10 +1,11 @@
 import asyncio, html, logging, re, time
+from datetime import datetime, timedelta, timezone
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BotCommand, CallbackQuery, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import BotCommand, BotCommandScopeChat, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 import config, db, panel, payments, redirect, screens
 
@@ -21,7 +22,17 @@ def track(u):
 
 class Track(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        track(getattr(event, "from_user", None))
+        u = getattr(event, "from_user", None)
+        if u is not None and u.id not in config.ADMIN_IDS and db.is_banned(u.id):
+            try:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Доступ ограничен. Напишите в поддержку.", show_alert=True)
+                else:
+                    await event.answer("Доступ ограничен. Напишите в поддержку.")
+            except Exception:
+                pass
+            return
+        track(u)
         return await handler(event, data)
 
 dp.message.outer_middleware(Track())
@@ -203,6 +214,63 @@ WAIT_PROMO = set()   # пользователи, от которых ждём п
 def is_admin(m: Message): return m.from_user.id in config.ADMIN_IDS
 def can_stats(m: Message): return m.from_user.id in config.ADMIN_IDS or m.from_user.id in config.STATS_IDS
 
+# ---------- помощники для админских команд ----------
+TZ = timezone(timedelta(hours=config.TZ_HOURS))
+DATE_RE = re.compile(r"^\d{1,2}\.\d{1,2}\.\d{4}$")
+
+def tfmt(ts, fmt="%d.%m.%Y %H:%M"): return datetime.fromtimestamp(ts, TZ).strftime(fmt)
+def dfmt(ts): return tfmt(ts, "%d.%m.%Y")
+
+def end_of_day(s):
+    """'31.12.2026' -> метка времени конца этого дня в часовом поясе TZ_HOURS. None, если дата кривая."""
+    try:
+        d, mth, y = (int(x) for x in s.split("."))
+        return int(datetime(y, mth, d, 23, 59, 59, tzinfo=TZ).timestamp())
+    except Exception:
+        return None
+
+def sub_status(u):
+    s = u["sub_until"] or 0
+    if s > time.time(): return "до " + dfmt(s)
+    if s: return "истекла " + dfmt(s)
+    return "нет подписки"
+
+def who(u):
+    name = html.escape(u["name"] or "") or "без имени"
+    link = f'https://t.me/{u["username"]}' if u["username"] else f'tg://user?id={u["id"]}'
+    return f'<a href="{link}">{name}</a>' + (f' @{html.escape(u["username"])}' if u["username"] else "")
+
+async def fill_profiles(rows):
+    """Подтягивает из Telegram имена тех, кого бот ещё не «видел». Возвращает свежие строки в том же порядке."""
+    for uid in db.users_without_profile([r["id"] for r in rows]):
+        try:
+            ch = await bot.get_chat(uid)
+            db.touch_user(uid, ch.username or "", ((ch.first_name or "") + " " + (ch.last_name or "")).strip() or "(без имени)")
+        except Exception:
+            db.touch_user(uid, "", "(профиль недоступен)")
+    return [db.peek_user(r["id"]) or r for r in rows]
+
+async def send_lines(m, header, lines, footer=""):
+    """Шлёт длинный список несколькими сообщениями."""
+    chunk = header + "\n\n"
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            await m.answer(chunk, disable_web_page_preview=True); chunk = ""
+        chunk += line + "\n"
+    await m.answer(chunk + footer, disable_web_page_preview=True)
+
+def resolve_user(arg):
+    """ID или @username -> строка пользователя (без создания). None, если не нашли или неоднозначно."""
+    arg = (arg or "").strip()
+    if not arg: return None
+    if arg.lstrip("-").isdigit(): return db.peek_user(int(arg))
+    found = db.find_users(arg)
+    exact = [r for r in found if (r["username"] or "").lower() == arg.lstrip("@").lower()]
+    if exact: return exact[0]
+    return found[0] if len(found) == 1 else None
+
+NOT_FOUND = "Не нашёл такого пользователя. Укажи числовой ID или @username (человек должен был писать боту)."
+
 @dp.message(Command("promo"))
 async def cmd_promo(m: Message):
     WAIT_PROMO.add(m.from_user.id)
@@ -225,21 +293,36 @@ async def got_promo(m: Message):
 
 @dp.message(Command("newpromo"), is_admin)
 async def cmd_newpromo(m: Message, command: CommandObject):
+    usage = ("Формат: /newpromo КОД ДНИ [МАКС_АКТИВАЦИЙ] [ДО_ДАТЫ]\n"
+             "Примеры:\n/newpromo WELCOME 7 100\n/newpromo SALE 14 0 31.12.2026\n"
+             "Дата в формате ДД.ММ.ГГГГ, код действует до конца этого дня.")
     try:
-        a = command.args.split(); code, days = a[0], int(a[1]); uses = int(a[2]) if len(a) > 2 else 0
+        a = command.args.split(); code, days = a[0], int(a[1]); assert days > 0
+        uses, exp = 0, 0
+        for t in a[2:]:
+            if DATE_RE.match(t):
+                exp = end_of_day(t); assert exp and exp > time.time()
+            else:
+                uses = int(t); assert uses >= 0
     except Exception:
-        return await m.answer("Формат: /newpromo КОД ДНИ [МАКС_АКТИВАЦИЙ]\nПример: /newpromo WELCOME 7 100")
-    db.create_promo(code, days, uses)
-    await m.answer(f"Готово: {code.upper()} даёт +{days} дн." + (f", максимум {uses} активаций." if uses else ", без лимита."))
+        return await m.answer(usage)
+    db.create_promo(code, days, uses, exp)
+    await m.answer(f"Готово: {code.upper()} даёт +{days} дн." + (f", максимум {uses} активаций" if uses else ", без лимита активаций")
+                   + (f", действует до {dfmt(exp)} включительно." if exp else ", без срока."))
 
 @dp.message(Command("genpromo"), is_admin)
 async def cmd_genpromo(m: Message, command: CommandObject):
-    """Создаёт пачку одноразовых кодов: /genpromo ДНИ КОЛИЧЕСТВО [ПРЕФИКС]"""
+    """Создаёт пачку одноразовых кодов: /genpromo ДНИ КОЛИЧЕСТВО [ПРЕФИКС] [ДО_ДАТЫ]"""
     try:
-        a = command.args.split(); days, n = int(a[0]), int(a[1]); prefix = a[2].upper() if len(a) > 2 else "NQ"
+        a = command.args.split(); days, n = int(a[0]), int(a[1]); prefix, exp = "NQ", 0
+        for t in a[2:]:
+            if DATE_RE.match(t):
+                exp = end_of_day(t); assert exp and exp > time.time()
+            else:
+                prefix = t.upper()
         assert 1 <= n <= 200 and days > 0
     except Exception:
-        return await m.answer("Формат: /genpromo ДНИ КОЛИЧЕСТВО [ПРЕФИКС]\nПример: /genpromo 7 50 NQ\n(до 200 кодов за раз)")
+        return await m.answer("Формат: /genpromo ДНИ КОЛИЧЕСТВО [ПРЕФИКС] [ДО_ДАТЫ]\nПример: /genpromo 7 50 NQ 31.12.2026\n(до 200 кодов за раз)")
     import secrets
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     codes = []
@@ -248,8 +331,8 @@ async def cmd_genpromo(m: Message, command: CommandObject):
         if code not in codes:
             codes.append(code)
     for code in codes:
-        db.create_promo(code, days, 1)
-    text = f"Создано {n} одноразовых кодов по +{days} дн.:\n\n" + "\n".join(codes)
+        db.create_promo(code, days, 1, exp)
+    text = f"Создано {n} одноразовых кодов по +{days} дн." + (f", действуют до {dfmt(exp)}" if exp else "") + ":\n\n" + "\n".join(codes)
     for i in range(0, len(text), 3500):
         await m.answer(text[i:i + 3500])
 
@@ -281,10 +364,31 @@ async def cmd_delpromo(m: Message, command: CommandObject):
     ok = command.args and db.delete_promo(command.args.strip())
     await m.answer("Удалён." if ok else "Не найден. Формат: /delpromo КОД")
 
+@dp.message(Command("delallpromo"), is_admin)
+async def cmd_delallpromo(m: Message, command: CommandObject):
+    """/delallpromo [used] [да] : без «да» только показывает, сколько будет удалено."""
+    a = (command.args or "").lower().split()
+    only_spent = "used" in a
+    n = db.count_promos(only_spent)
+    what = "полностью использованных промокодов" if only_spent else "ВСЕХ промокодов"
+    if "да" not in a:
+        if n == 0:
+            return await m.answer("Удалять нечего: подходящих промокодов нет.")
+        cmd = "/delallpromo " + ("used " if only_spent else "") + "да"
+        return await m.answer(f"Будет удалено {what}: {n}.\nУже активированные дни у людей останутся.\n\nПодтвердить: {cmd}")
+    await m.answer(f"Удалено {what}: {db.delete_all_promos(only_spent)}.")
+
 @dp.message(Command("promos"), is_admin)
 async def cmd_promos(m: Message):
     rows = db.list_promos()
-    await m.answer("\n".join(f"{r['code']}: +{r['days']} дн., использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") for r in rows) or "Промокодов нет. Создай: /newpromo КОД ДНИ")
+    if not rows:
+        return await m.answer("Промокодов нет. Создай: /newpromo КОД ДНИ")
+    lines = []
+    for r in rows:
+        exp = r["expires"] or 0
+        tail = "" if not exp else (f", до {dfmt(exp)}" if exp > time.time() else f", истёк {dfmt(exp)}")
+        lines.append(f"<code>{r['code']}</code>: +{r['days']} дн., использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") + tail)
+    await send_lines(m, f"<b>Промокоды ({len(rows)})</b>", lines)
 
 @dp.message(Command("stats"), can_stats)
 async def cmd_stats(m: Message):
@@ -301,7 +405,8 @@ async def cmd_stats(m: Message):
         f"Активаций промокодов: {s['promo_uses']}\n\n"
         f"Оплат деньгами: {s['pay_n']} от {s['payers']} чел. на {s['pay_sum']:.0f} ₽\n"
         f"Оплат с баланса: {s['bal_sum']:.0f} ₽\n"
-        f"Сумма балансов у пользователей: {s['balances']:.0f} ₽")
+        f"Сумма балансов у пользователей: {s['balances']:.0f} ₽"
+        + (f"\nЗаблокировано: {s['banned']}" if s['banned'] else ""))
 
 @dp.message(Command("users"), is_admin)
 async def cmd_users(m: Message, command: CommandObject):
@@ -311,30 +416,227 @@ async def cmd_users(m: Message, command: CommandObject):
     total, rows = db.list_users((page - 1) * size, size)
     if not rows:
         return await m.answer(f"Пользователей: {total}. На странице {page} пусто.")
-    # те, кого бот ещё не «видел», подтягиваем из Telegram один раз
-    for uid in db.users_without_profile([r["id"] for r in rows]):
-        try:
-            ch = await bot.get_chat(uid)
-            db.touch_user(uid, ch.username or "", ((ch.first_name or "") + " " + (ch.last_name or "")).strip() or "(без имени)")
-        except Exception:
-            db.touch_user(uid, "", "(профиль недоступен)")
-    total, rows = db.list_users((page - 1) * size, size)
-    now = time.time()
-    lines = []
-    for u in rows:
-        if u["sub_until"] > now:
-            st = "до " + time.strftime("%d.%m.%Y", time.localtime(u["sub_until"]))
-        elif u["sub_until"]:
-            st = "истекла " + time.strftime("%d.%m.%Y", time.localtime(u["sub_until"]))
-        else:
-            st = "нет подписки"
-        name = html.escape(u["name"] or "") or "без имени"
-        link = f'https://t.me/{u["username"]}' if u["username"] else f'tg://user?id={u["id"]}'
-        who = f'<a href="{link}">{name}</a>' + (f' @{html.escape(u["username"])}' if u["username"] else "")
-        lines.append(f'{who} · <code>{u["id"]}</code> · {st}')
+    rows = await fill_profiles(rows)
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
     pages = (total + size - 1) // size
-    tail = f"\n\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
-    await m.answer(f"<b>Пользователи ({total})</b>\n\n" + "\n".join(lines) + tail, disable_web_page_preview=True)
+    tail = f"\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
+    await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail)
+
+@dp.message(Command("find"), is_admin)
+async def cmd_find(m: Message, command: CommandObject):
+    q = (command.args or "").strip()
+    if not q:
+        return await m.answer("Формат: /find ИМЯ, @ник или ID\nПример: /find вася")
+    rows = db.find_users(q)
+    unknown = db.count_unknown_profiles()
+    note = f"\nУ {unknown} чел. имя ещё не известно, они найдутся по ID или после /users." if unknown else ""
+    if not rows:
+        return await m.answer("Никого не нашёл." + note)
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
+    await send_lines(m, f"<b>Найдено: {len(rows)}</b>", lines, note)
+
+@dp.message(Command("user"), is_admin)
+async def cmd_user(m: Message, command: CommandObject):
+    if not (command.args or "").strip():
+        return await m.answer("Формат: /user ID или @ник\nПример: /user 123456789")
+    u = resolve_user(command.args)
+    if not u:
+        return await m.answer(NOT_FOUND)
+    u = (await fill_profiles([u]))[0]
+    uid = u["id"]
+    n_fr, earned, _ = db.friends_stats(uid)
+    pay_n, pay_sum = db.user_pay_totals(uid)
+    L = [f'{who(u)}', f'ID: <code>{uid}</code>', f'Подписка: {sub_status(u)}']
+    if u["banned"]: L.append("⛔ Заблокирован")
+    L.append(f'Пробник: {"использован" if u["trial_used"] else "не брал"}')
+    L.append(f'Регистрация: {tfmt(u["created"])}' if u["created"] else "Регистрация: неизвестно")
+    L.append(f'Баланс: основной {u["topup"] or 0:.0f} ₽, реферальный {u["balance"] or 0:.0f} ₽')
+    if u["ref"]:
+        r = db.peek_user(u["ref"])
+        L.append("Пригласил: " + (who(r) if r and (r["name"] or r["username"]) else f'<code>{u["ref"]}</code>'))
+    L.append(f'Привёл друзей: {n_fr}, заработал {earned:.0f} ₽')
+    L.append(f'Промокодов активировано: {db.promo_use_count(uid)}')
+    L.append(f'Оплат деньгами: {pay_n} на {pay_sum:.0f} ₽')
+    pays = db.user_payments(uid, 5)
+    if pays:
+        L.append("\nПоследние оплаты:")
+        for p in pays:
+            plan = config.PLANS.get(p["plan"], (0, 0, p["plan"]))[2]
+            L.append(f'• {tfmt(p["created"])} · {p["amount"]} ₽ · {plan} · {"с баланса" if p["method"] == "balance" else p["method"]}')
+    info = await panel.get_info(uid)
+    if info:
+        L.append("\nПанель:")
+        L.append(f'Статус: {info.get("status", "?")}')
+        tr = (info.get("userTraffic") or {}).get("usedTrafficBytes", info.get("usedTrafficBytes"))
+        if tr is not None:
+            L.append(f'Трафик: {tr / 1024 ** 3:.2f} ГБ')
+        if info.get("hwidDeviceLimit") is not None:
+            L.append(f'Лимит устройств: {info["hwidDeviceLimit"]}')
+    elif config.PANEL_URL:
+        L.append("\nПанель: пользователя там нет или она недоступна.")
+    await m.answer("\n".join(L), disable_web_page_preview=True)
+
+@dp.message(Command("give"), is_admin)
+async def cmd_give(m: Message, command: CommandObject):
+    usage = "Формат: /give ID_или_@ник ДНИ [тихо]\nПример: /give 123456789 7\n«тихо» = не писать человеку."
+    a = (command.args or "").split()
+    try:
+        days = int(a[1]); assert 1 <= days <= 3650
+    except Exception:
+        return await m.answer(usage)
+    u = resolve_user(a[0])
+    if not u:
+        return await m.answer(NOT_FOUND)
+    until = db.extend(u["id"], days)
+    await panel.set_expiry(u["id"], until)
+    sent = ""
+    if "тихо" not in [x.lower() for x in a[2:]]:
+        try:
+            await bot.send_message(u["id"], f"Вам начислено +{days} дн. Подписка активна до {dfmt(until)}.")
+            sent = " Человеку отправлено сообщение."
+        except Exception:
+            sent = " Сообщение человеку не дошло."
+    await m.answer(f"Готово: {u['id']} +{days} дн., подписка до {dfmt(until)}." + sent)
+
+async def _ban(m: Message, command: CommandObject, flag: bool):
+    word = "ban" if flag else "unban"
+    if not (command.args or "").strip():
+        return await m.answer(f"Формат: /{word} ID или @ник")
+    first = command.args.strip().split()[0]
+    if flag and first.lstrip("-").isdigit() and int(first) in config.ADMIN_IDS:
+        return await m.answer("Админа заблокировать нельзя.")
+    u = resolve_user(command.args)
+    if not u:
+        return await m.answer(NOT_FOUND)
+    if flag and u["id"] in config.ADMIN_IDS:
+        return await m.answer("Админа заблокировать нельзя.")
+    db.set_banned(u["id"], flag)
+    try:
+        await panel.set_banned(u["id"])
+        tail = " В панели доступ " + ("отключён." if flag else "восстановлен по сроку подписки.")
+    except Exception:
+        logging.exception("panel ban failed")
+        tail = " В панели не получилось: проверь вручную."
+    await m.answer(("⛔ Заблокирован: " if flag else "✅ Разблокирован: ") + f'{who(u)} · <code>{u["id"]}</code>.' + tail, disable_web_page_preview=True)
+
+@dp.message(Command("ban"), is_admin)
+async def cmd_ban(m: Message, command: CommandObject): await _ban(m, command, True)
+
+@dp.message(Command("unban"), is_admin)
+async def cmd_unban(m: Message, command: CommandObject): await _ban(m, command, False)
+
+@dp.message(Command("payments"), is_admin)
+async def cmd_payments(m: Message, command: CommandObject):
+    try: n = min(40, max(1, int((command.args or "15").strip())))
+    except ValueError: n = 15
+    rows = db.recent_payments(n)
+    if not rows:
+        return await m.answer("Оплат пока нет.")
+    lines = []
+    for r in rows:
+        plan = config.PLANS.get(r["plan"], (0, 0, r["plan"]))[2]
+        how = "с баланса" if r["method"] == "balance" else r["method"]
+        lines.append(f'{tfmt(r["created"], "%d.%m %H:%M")} · {r["amount"]} ₽ · {plan} · {how}\n   {who(r)} · <code>{r["id"]}</code>')
+    await send_lines(m, f"<b>Последние оплаты ({len(rows)})</b>", lines)
+
+@dp.message(Command("expiring"), is_admin)
+async def cmd_expiring(m: Message, command: CommandObject):
+    try: days = min(30, max(1, int((command.args or "3").strip())))
+    except ValueError: days = 3
+    rows = db.expiring_users(days)
+    if not rows:
+        return await m.answer(f"В ближайшие {days} дн. подписки ни у кого не заканчиваются.")
+    rows = await fill_profiles(rows)
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · до {tfmt(u["sub_until"])}' for u in rows]
+    await send_lines(m, f"<b>Заканчивается в ближайшие {days} дн.: {len(rows)}</b>", lines)
+
+SEGMENTS = {"all": "всем", "active": "с активной подпиской", "expired": "с закончившейся подпиской", "never": "без подписки"}
+BCAST = {}          # id админа -> (сегмент, текст), ждёт подтверждения
+BCAST_BUSY = False
+
+@dp.message(Command("broadcast"), is_admin)
+async def cmd_broadcast(m: Message, command: CommandObject):
+    usage = ("Формат: /broadcast [СЕГМЕНТ] ТЕКСТ\nСегменты: all (всем, по умолчанию), active (с подпиской), "
+             "expired (подписка закончилась), never (без подписки).\n"
+             "Пример: /broadcast active Завтра работы на серверах, возможны перебои.\n"
+             "Поддерживается HTML: <b>жирный</b>, <i>курсив</i>. Сначала придёт предпросмотр.")
+    raw = (command.args or "").strip()
+    seg, text = "all", raw
+    parts = raw.split(None, 1)
+    if parts and parts[0].lower() in SEGMENTS:
+        seg, text = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+    if not text.strip() or len(text) > 3800:
+        return await m.answer(usage)
+    try:
+        await m.answer(text, disable_web_page_preview=True)
+    except TelegramBadRequest as e:
+        return await m.answer("Ошибка в оформлении текста: " + html.escape(str(e)) + "\nПроверь HTML-теги или убери их.")
+    BCAST[m.from_user.id] = (seg, text)
+    n = len(db.segment_ids(seg))
+    await m.answer(f"☝️ Предпросмотр. Получат {SEGMENTS[seg]}: {n} чел.\n\nОтправить: /broadcastok\nОтменить: /broadcastcancel")
+
+@dp.message(Command("broadcastcancel"), is_admin)
+async def cmd_broadcastcancel(m: Message):
+    await m.answer("Рассылка отменена." if BCAST.pop(m.from_user.id, None) else "Нечего отменять.")
+
+async def _broadcast(admin_id, ids, text):
+    global BCAST_BUSY
+    BCAST_BUSY = True
+    ok = blocked = failed = 0
+    try:
+        for uid in ids:
+            for attempt in (1, 2):
+                try:
+                    await bot.send_message(uid, text, disable_web_page_preview=True); ok += 1; break
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                    if attempt == 2: failed += 1
+                except TelegramForbiddenError:
+                    blocked += 1; break
+                except Exception:
+                    failed += 1; break
+            await asyncio.sleep(0.05)   # около 20 сообщений в секунду, в пределах лимита Telegram
+    finally:
+        BCAST_BUSY = False
+    try:
+        await bot.send_message(admin_id, f"Рассылка закончена.\nДоставлено: {ok}\nЗаблокировали бота: {blocked}\nОшибок: {failed}")
+    except Exception:
+        logging.exception("broadcast report")
+
+@dp.message(Command("broadcastok"), is_admin)
+async def cmd_broadcastok(m: Message):
+    if BCAST_BUSY:
+        return await m.answer("Другая рассылка ещё идёт. Дождись отчёта.")
+    pending = BCAST.pop(m.from_user.id, None)
+    if not pending:
+        return await m.answer("Нет подготовленной рассылки. Сначала: /broadcast ТЕКСТ")
+    seg, text = pending
+    ids = db.segment_ids(seg)
+    if not ids:
+        return await m.answer("В этом сегменте никого нет.")
+    asyncio.create_task(_broadcast(m.from_user.id, ids, text))
+    await m.answer(f"Рассылка запущена: {len(ids)} чел. Примерно {max(1, len(ids) // 20)} сек. Отчёт пришлю сюда.")
+
+ADMIN_HELP = (
+    "<b>Команды админа</b>\n\n"
+    "<b>Люди</b>\n"
+    "/stats: сводка\n/users [стр]: список\n/find ЗАПРОС: поиск по имени, @нику или ID\n"
+    "/user ID: карточка человека\n/expiring [дни]: у кого скоро конец подписки\n/payments [N]: последние оплаты\n\n"
+    "<b>Управление</b>\n"
+    "/give ID ДНИ [тихо]: выдать дни\n/ban ID и /unban ID: заблокировать и разблокировать\n"
+    "/addbal ID СУММА и /addref ID СУММА: баланс\n/balance [ID]: показать баланс\n\n"
+    "<b>Промокоды</b>\n"
+    "/newpromo КОД ДНИ [АКТИВАЦИЙ] [ДД.ММ.ГГГГ]\n/genpromo ДНИ КОЛ-ВО [ПРЕФИКС] [ДД.ММ.ГГГГ]\n"
+    "/promos: список\n/delpromo КОД\n/delallpromo [used] да: удалить все или только использованные\n\n"
+    "<b>Рассылка</b>\n"
+    "/broadcast [all|active|expired|never] ТЕКСТ: предпросмотр\n/broadcastok: отправить\n/broadcastcancel: отменить")
+
+@dp.message(Command("admin"), can_stats)
+async def cmd_admin(m: Message):
+    if m.from_user.id in config.ADMIN_IDS:
+        await m.answer(ADMIN_HELP)
+    else:
+        await m.answer("<b>Тебе доступна</b>\n\n/stats: сводка по пользователям и оплатам")
 
 @dp.callback_query(F.data == "later")
 async def cb_later(c: CallbackQuery):
@@ -357,14 +659,30 @@ async def reminders():
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    await bot.set_my_commands([
+    public_cmds = [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="connect", description="Подключиться"),
         BotCommand(command="plans", description="Тарифы"),
         BotCommand(command="profile", description="Профиль"),
         BotCommand(command="friends", description="Пригласить друга"),
         BotCommand(command="promo", description="Ввести промокод"),
-        BotCommand(command="support", description="Поддержка")])
+        BotCommand(command="support", description="Поддержка")]
+    await bot.set_my_commands(public_cmds)
+    admin_cmds = public_cmds + [
+        BotCommand(command="admin", description="Команды админа"),
+        BotCommand(command="stats", description="Статистика"),
+        BotCommand(command="users", description="Список пользователей"),
+        BotCommand(command="find", description="Найти человека"),
+        BotCommand(command="user", description="Карточка человека"),
+        BotCommand(command="expiring", description="Скоро закончится подписка"),
+        BotCommand(command="payments", description="Последние оплаты"),
+        BotCommand(command="give", description="Выдать дни"),
+        BotCommand(command="broadcast", description="Рассылка")]
+    for aid in config.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=aid))
+        except Exception:
+            logging.warning("не удалось задать меню админу %s (он ещё не писал боту?)", aid)
     await redirect.start_server()
     asyncio.create_task(reminders())
     for p in db.pending_payments():

@@ -16,7 +16,8 @@ for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users AD
              "ALTER TABLE users ADD COLUMN topup REAL DEFAULT 0",        # основной баланс (пополняет админ)
              "ALTER TABLE users ADD COLUMN ref_earned REAL DEFAULT 0",   # всего заработано на рефералах
              "ALTER TABLE users ADD COLUMN username TEXT",               # @username в Telegram
-             "ALTER TABLE users ADD COLUMN name TEXT"):                  # имя и фамилия в Telegram
+             "ALTER TABLE users ADD COLUMN name TEXT",                  # имя и фамилия в Telegram
+             "ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0"):   # 1 = заблокирован админом
     try:
         con.execute(_sql); con.commit()
     except sqlite3.OperationalError:
@@ -32,9 +33,14 @@ CREATE TABLE IF NOT EXISTS promo_uses(
   code TEXT, user_id INTEGER, ts INTEGER, PRIMARY KEY(code, user_id));
 """)
 
-def create_promo(code, days, max_uses=0):
-    con.execute("INSERT OR REPLACE INTO promo_codes(code,days,max_uses,used,created) VALUES(?,?,?,COALESCE((SELECT used FROM promo_codes WHERE code=?),0),?)",
-                (code.upper(), days, max_uses, code.upper(), int(time.time()))); con.commit()
+try:
+    con.execute("ALTER TABLE promo_codes ADD COLUMN expires INTEGER DEFAULT 0"); con.commit()   # до какого момента действует код (0 = бессрочно)
+except sqlite3.OperationalError:
+    pass
+
+def create_promo(code, days, max_uses=0, expires=0):
+    con.execute("INSERT OR REPLACE INTO promo_codes(code,days,max_uses,used,created,expires) VALUES(?,?,?,COALESCE((SELECT used FROM promo_codes WHERE code=?),0),?,?)",
+                (code.upper(), days, max_uses, code.upper(), int(time.time()), expires)); con.commit()
 
 def delete_promo(code):
     cur = con.execute("DELETE FROM promo_codes WHERE code=?", (code.upper(),)); con.commit(); return cur.rowcount
@@ -47,6 +53,7 @@ def use_promo(uid, code):
     code = code.strip().upper()
     p = con.execute("SELECT * FROM promo_codes WHERE code=?", (code,)).fetchone()
     if not p: return ("not_found", 0, 0)
+    if (p["expires"] or 0) and p["expires"] < time.time(): return ("expired", 0, 0)
     if p["max_uses"] and p["used"] >= p["max_uses"]: return ("exhausted", 0, 0)
     try:
         con.execute("INSERT INTO promo_uses(code,user_id,ts) VALUES(?,?,?)", (code, uid, int(time.time())))
@@ -178,6 +185,7 @@ def stats(now=None):
         "promo_uses": q("SELECT COUNT(*) FROM promo_uses"),
         "new_day": q("SELECT COUNT(*) FROM users WHERE created>?", now - 86400),
         "new_week": q("SELECT COUNT(*) FROM users WHERE created>?", now - 7 * 86400),
+        "banned": q("SELECT COUNT(*) FROM users WHERE COALESCE(banned,0)=1"),
     }
 
 def list_users(offset=0, limit=30):
@@ -197,3 +205,73 @@ def users_without_profile(ids):
     q = ",".join("?" * len(ids))
     rows = con.execute(f"SELECT id FROM users WHERE id IN ({q}) AND name IS NULL AND username IS NULL", ids).fetchall()
     return [r["id"] for r in rows]
+
+def delete_all_promos(only_spent=False):
+    """Удаляет все промокоды (или только полностью использованные). Возвращает сколько удалено."""
+    if only_spent:
+        cur = con.execute("DELETE FROM promo_codes WHERE max_uses>0 AND used>=max_uses")
+    else:
+        cur = con.execute("DELETE FROM promo_codes")
+    con.commit(); return cur.rowcount
+
+def count_promos(only_spent=False):
+    sql = "SELECT COUNT(*) FROM promo_codes" + (" WHERE max_uses>0 AND used>=max_uses" if only_spent else "")
+    return con.execute(sql).fetchone()[0]
+
+
+# ---------- админские выборки ----------
+def peek_user(uid):
+    """Пользователь без создания записи. None, если нет."""
+    return con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+
+def is_banned(uid):
+    r = con.execute("SELECT banned FROM users WHERE id=?", (uid,)).fetchone()
+    return bool(r and r["banned"])
+
+def set_banned(uid, flag):
+    con.execute("UPDATE users SET banned=? WHERE id=?", (1 if flag else 0, uid)); con.commit()
+
+def find_users(q, limit=20):
+    """Поиск по ID (точно), @username и имени (по части, без учёта регистра). Среди известных профилей."""
+    q = (q or "").strip().lstrip("@").lower()
+    if not q: return []
+    if q.isdigit():
+        r = peek_user(int(q)); return [r] if r else []
+    out = []
+    for r in con.execute("SELECT * FROM users WHERE username IS NOT NULL OR name IS NOT NULL").fetchall():
+        if q in (r["username"] or "").lower() or q in (r["name"] or "").lower():
+            out.append(r)
+            if len(out) >= limit: break
+    return out
+
+def count_unknown_profiles():
+    return con.execute("SELECT COUNT(*) FROM users WHERE name IS NULL AND username IS NULL").fetchone()[0]
+
+def expiring_users(days):
+    now = int(time.time())
+    return con.execute("SELECT * FROM users WHERE sub_until>? AND sub_until<? ORDER BY sub_until",
+                       (now, now + days * 86400)).fetchall()
+
+def recent_payments(limit=15):
+    return con.execute("SELECT p.created, p.amount, p.method, p.plan, p.user_id AS id, u.username, u.name "
+                       "FROM payments p LEFT JOIN users u ON u.id=p.user_id WHERE p.status='paid' "
+                       "ORDER BY p.created DESC, p.id DESC LIMIT ?", (limit,)).fetchall()
+
+def user_payments(uid, limit=5):
+    return con.execute("SELECT * FROM payments WHERE user_id=? AND status='paid' ORDER BY created DESC, id DESC LIMIT ?",
+                       (uid, limit)).fetchall()
+
+def user_pay_totals(uid):
+    """(число оплат деньгами, сумма)"""
+    r = con.execute("SELECT COUNT(*), COALESCE(SUM(amount),0) FROM payments WHERE user_id=? AND status='paid' AND method!='balance'", (uid,)).fetchone()
+    return r[0], r[1]
+
+def promo_use_count(uid):
+    return con.execute("SELECT COUNT(*) FROM promo_uses WHERE user_id=?", (uid,)).fetchone()[0]
+
+def segment_ids(seg):
+    """ID для рассылки: all | active | expired | never. Заблокированные не входят."""
+    now = int(time.time())
+    cond = {"all": "1=1", "active": "sub_until>?", "expired": "sub_until>0 AND sub_until<=?", "never": "sub_until=0"}[seg]
+    params = (now,) if "?" in cond else ()
+    return [r["id"] for r in con.execute(f"SELECT id FROM users WHERE COALESCE(banned,0)=0 AND {cond}", params).fetchall()]

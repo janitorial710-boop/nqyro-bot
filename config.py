@@ -30,6 +30,7 @@ if not DEV_PAY and not (YK_SHOP_ID and YK_SECRET):
     raise RuntimeError("Задай YK_SHOP_ID и YK_SECRET или включи DEV_PAY=1")
 
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # только числовые ID
+TZ_HOURS = int(os.getenv("TZ_HOURS", "7"))   # часовой пояс для дат в админских командах (7 = Новосибирск)
 STATS_IDS = {int(x) for x in os.getenv("STATS_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # видят только /stats
 
 # --- Панель Remnawave ---
