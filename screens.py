@@ -47,24 +47,45 @@ def connect(u, sub=None):
             [Btn(text="Скопировать ссылку", copy_text=CopyTextButton(text=sub))],
             [b("Назад", "go:start")]]))
 
-def plans(u):
-    p = config.PLANS
-    return ("04_plans.png",
-        "<b>Выбери тариф</b>\n\n1 месяц: 249 ₽\n3 месяца: 599 ₽ (−20%)\n12 месяцев: 1 990 ₽ (−33%)\n\nДо 3 устройств на одну подписку.",
-        kb([("1 месяц · 249 ₽", "buy:1")], [("3 месяца · 599 ₽", "buy:3")], [("12 месяцев · 1 990 ₽", "buy:12")], [("Назад", "go:start")]))
+def _rub(n): return f"{n:,}".replace(",", " ")
 
-def payment(u, plan):
-    price, _, name = config.PLANS[plan]
+def plans(u):
+    dl = db.disc_label(u)
+    pr = {k: db.price_for(u, k) for k in config.PLANS}
+    return ("04_plans.png",
+        "<b>Выбери тариф</b>\n\n1 месяц: 249 ₽\n3 месяца: 599 ₽ (−20%)\n12 месяцев: 1 990 ₽ (−33%)\n\nДо 3 устройств на одну подписку."
+        + (f"\n\nТвоя скидка {dl} уже применена к цене в кнопках." if dl else ""),
+        kb([(f"1 месяц · {_rub(pr['1'])} ₽", "buy:1")], [(f"3 месяца · {_rub(pr['3'])} ₽", "buy:3")], [(f"12 месяцев · {_rub(pr['12'])} ₽", "buy:12")],
+           [("Подарить подписку", "go:gift")], [("Назад", "go:start")]))
+
+def gift_plans(u):
+    return ("04_plans.png",
+        "<b>Подарить подписку</b>\n\nВыбери срок. После оплаты получишь код и ссылку: отправь их другу, и подписка добавится ему сама. Код одноразовый.",
+        kb([("1 месяц · 249 ₽", "gbuy:1")], [("3 месяца · 599 ₽", "gbuy:3")], [("12 месяцев · 1 990 ₽", "gbuy:12")], [("Назад", "go:plans")]))
+
+def gift_ready(u, code):
+    link = f"https://t.me/{config.BOT_USERNAME}?start=gift_{code}"
+    share = "https://t.me/share/url?url=" + quote(link) + "&text=" + quote("Дарю тебе подписку NQYRO")
+    return ("06_success.png",
+        f"<b>Подарок готов</b>\n\nКод: <code>{code}</code>\n\nСсылка для друга:\n<code>{link}</code>\n\nДрузья нажимают на ссылку или вводят код в разделе «Промокод».",
+        Markup(inline_keyboard=[[b("Отправить другу", "url:" + share)], [b("Главное меню", "go:start")]]))
+
+def payment(u, plan, gift=False):
+    name = config.PLANS[plan][2]
+    price = db.price_for(u, plan, gift)
+    g = "g" if gift else ""
     bal = db.total_balance(u)
     rows = []
     bal_line = ""
     if bal > 0:
         bal_line = f"\nНа балансе: {bal:.0f} ₽"
         label = f"Оплатить балансом · {bal:.0f} ₽" if bal >= price else f"Баланс · {bal:.0f} ₽ (не хватает {price - bal:.0f} ₽)"
-        rows.append([(label, f"paybal:{plan}")])
-    return ("05_payment.png", f"<b>Оплата</b>\n\nТариф: {name}\nК оплате: {price} ₽{bal_line}\n\nВыбери способ оплаты.",
-        kb(*rows, [("СБП", f"pay:{plan}:sbp")], [("Банковская карта", f"pay:{plan}:card")],
-           [("Другие способы", f"pay:{plan}:any")], [("Назад", "go:plans")]))
+        rows.append([(label, f"{g}paybal:{plan}")])
+    base = config.PLANS[plan][0]
+    price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка {db.disc_label(u)})" if price != base else "")
+    return ("05_payment.png", f"<b>{'Оплата подарка' if gift else 'Оплата'}</b>\n\nТариф: {name}\n{price_line}{bal_line}\n\nВыбери способ оплаты.",
+        kb(*rows, [("СБП", f"{g}pay:{plan}:sbp")], [("Банковская карта", f"{g}pay:{plan}:card")],
+           [("Другие способы", f"{g}pay:{plan}:any")], [("Назад", "go:gift" if gift else "go:plans")]))
 
 def pay_dev(u, pid):
     return ("05_payment.png", "<b>Тестовый режим</b>\n\nПлатёжный сервис не подключён. Нажми кнопку, чтобы имитировать оплату.",
@@ -83,7 +104,8 @@ def profile(u):
     active = u["sub_until"] > time.time()
     text = (f"<b>Профиль</b>\n\nСтатус: {'активна' if active else 'не активна'}\n"
             f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3\n"
-            f"Баланс: {db.total_balance(u):.0f} ₽")
+            f"Баланс: {db.total_balance(u):.0f} ₽"
+            + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
         kb([("Продлить", "go:plans")], [("Подключиться", "go:connect"), ("Промокод", "promo")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
 
@@ -115,6 +137,30 @@ def promo_prompt(u):
 def promo_ok(u, days, until):
     return ("13_promo_ok.png", f"<b>Промокод активирован</b>\n\nНачислено: +{days} дн.\nПодписка активна до {d(until)}.",
         kb([("Подключиться", "go:connect")], [("Профиль", "go:profile")]))
+
+def promo_disc(u):
+    return ("13_promo_ok.png", f"<b>Скидка активирована</b>\n\nТвоя скидка: {db.disc_label(u)}.\nОна применится к цене при следующей оплате подписки.",
+        kb([("Выбрать тариф", "go:plans")], [("Главное меню", "go:start")]))
+
+def abandoned(u, plan):
+    name = config.PLANS[plan][2]
+    return ("05_payment.png", f"<b>Оплата не завершена</b>\n\nТы начал оплачивать тариф «{name}», но счёт остался неоплаченным. Если что-то не получилось, выбери другой способ или напиши нам.",
+        kb([("Вернуться к оплате", f"buy:{plan}")], [("Поддержка", "go:support")]))
+
+def auto_welcome(u):
+    if not u["trial_used"] and u["sub_until"] <= 0:
+        return ("01_start.png", "<b>Привет! Это NQYRO</b>\n\nУ тебя есть 5 дней бесплатно, чтобы попробовать. Занимает минуту.",
+                kb([("Попробовать 5 дней", "trial")], [("Главное меню", "go:start")]))
+    return ("01_start.png", "<b>Привет! Это NQYRO</b>\n\nЕсли что-то не получилось с подключением, напиши нам, поможем.",
+            kb([("Подключиться", "go:connect")], [("Поддержка", "go:support")]))
+
+def auto_day3(u):
+    return ("10_support.png", "<b>Как дела?</b>\n\nВсё ли работает так, как нужно? Если что-то тормозит или не подключается, напиши нам, разберёмся.",
+            kb([("Написать в поддержку", "url:https://t.me/" + config.SUPPORT_USERNAME)], [("Главное меню", "go:start")]))
+
+def auto_miss(u):
+    return ("09_expiring.png", "<b>Скучаем по тебе</b>\n\nПодписка закончилась неделю назад. Вернись, и всё заработает сразу, как раньше.",
+            kb([("Продлить", "go:plans")], [("Главное меню", "go:start")]))
 
 def promo_bad(u, reason):
     t = {"not_found": ("Код не найден", "Проверь, нет ли опечатки, и попробуй ещё раз."),

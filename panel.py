@@ -97,6 +97,13 @@ async def set_banned(uid: int) -> None:
     """Применяет в панели текущее состояние блокировки из базы (флаг banned уже выставлен). Бросает исключение при сбое."""
     await _sync(uid, db.get_user(uid)["sub_until"])
 
+async def get_nodes():
+    """Список нод из панели. Бросает исключение, если панель не ответила или токен не подошёл."""
+    st, data = await _call("GET", "/api/nodes")
+    if st != 200 or not isinstance(data, list):
+        raise RuntimeError(f"panel nodes HTTP {st}")
+    return data
+
 async def get_info(uid: int):
     """Объект пользователя из панели или None (для /user)."""
     if not config.PANEL_URL:

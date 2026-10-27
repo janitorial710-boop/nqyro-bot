@@ -16,6 +16,8 @@ OPEN_URL = os.getenv("OPEN_URL", "") or (f"{OPEN_BASE}/open/{{app}}?sub={{sub}}"
 HAPP_URL = os.getenv("HAPP_URL", "https://www.happ.su")
 INCY_URL = os.getenv("INCY_URL", "https://incy.cc")
 TRIAL_DAYS = 5
+AUTO_MSGS = os.getenv("AUTO_MSGS", "1") == "1"                 # автосообщения и напоминания о брошенной оплате (0 = выключить)
+ABANDON_AFTER_MIN = int(os.getenv("ABANDON_AFTER_MIN", "60"))  # через сколько минут напомнить о неоплаченном счёте
 REF_PERCENT = 20
 # ключ: (цена, дней, название)
 PLANS = {"1": (249, 30, "1 месяц"), "3": (599, 90, "3 месяца"), "12": (1990, 365, "12 месяцев")}
@@ -29,9 +31,14 @@ RETURN_URL = os.getenv("RETURN_URL", f"https://t.me/{BOT_USERNAME}")
 if not DEV_PAY and not (YK_SHOP_ID and YK_SECRET):
     raise RuntimeError("Задай YK_SHOP_ID и YK_SECRET или включи DEV_PAY=1")
 
+SUPPORT_IDS = {int(x) for x in os.getenv("SUPPORT_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # роль «поддержка»: /find /user /users /expiring /give (до SUPPORT_GIVE_MAX дней)
+SUPPORT_GIVE_MAX = int(os.getenv("SUPPORT_GIVE_MAX", "30"))
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # только числовые ID
 TZ_HOURS = int(os.getenv("TZ_HOURS", "7"))   # часовой пояс для дат в админских командах (7 = Новосибирск)
-STATS_IDS = {int(x) for x in os.getenv("STATS_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # видят только /stats
+STATS_IDS = {int(x) for x in os.getenv("STATS_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # роль «бухгалтер» (прежнее название): /stats /payments /abandoned /report
+ACCOUNTANT_IDS = STATS_IDS | {int(x) for x in os.getenv("ACCOUNTANT_IDS", "").replace(" ", "").split(",") if x.isdigit()}   # то же самое, можно задавать любой из двух переменных
+REPORT_HOUR = int(os.getenv("REPORT_HOUR", "9"))        # во сколько (по TZ_HOURS) слать утренний отчёт; -1 = выключить
+MONITOR_SEC = int(os.getenv("MONITOR_SEC", "120"))      # как часто проверять панель и ноды
 
 # --- Панель Remnawave ---
 PANEL_URL = os.getenv("PANEL_URL", "")        # например https://panel.example.com
