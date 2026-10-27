@@ -46,3 +46,21 @@ PANEL_URL = os.getenv("PANEL_URL", "")        # например https://panel.e
 PANEL_TOKEN = os.getenv("PANEL_TOKEN", "")    # API-токен: Remnawave -> Settings -> API Tokens
 PANEL_SQUAD = os.getenv("PANEL_SQUAD", "")    # UUID internal squad (необязательно)
 HWID_LIMIT = int(os.getenv("HWID_LIMIT", "3"))
+
+# --- Пополнение баланса пользователем ---
+TOPUP_MIN = int(os.getenv("TOPUP_MIN", "100"))
+TOPUP_MAX = int(os.getenv("TOPUP_MAX", "15000"))
+TOPUP_BONUS_PERCENT = int(os.getenv("TOPUP_BONUS_PERCENT", "0"))   # бонус к пополнению, % (0 = выключен)
+
+# --- Бэкапы базы ---
+BACKUP_HOUR = int(os.getenv("BACKUP_HOUR", "4"))      # во сколько (по TZ_HOURS) делать бэкап и слать админам; -1 = выключить
+BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "14"))     # сколько последних копий хранить на сервере
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
+
+# --- Вебхук ЮKassa (нужны WEB_PORT и OPEN_BASE) ---
+YK_WEBHOOK_SECRET = os.getenv("YK_WEBHOOK_SECRET", "")   # секрет в адресе: {OPEN_BASE}/yk/<секрет>; пусто = вебхук выключен
+
+def plan_name(key):
+    """Название тарифа для отображения; 'topup' = пополнение баланса."""
+    if key in PLANS: return PLANS[key][2]
+    return "пополнение баланса" if key == "topup" else str(key)

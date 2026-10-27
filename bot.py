@@ -1,4 +1,4 @@
-import asyncio, html, logging, re, time
+import asyncio, html, logging, os, re, time
 from datetime import datetime, timedelta, timezone
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, BotCommandScopeChat, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
-import config, db, monitor, panel, payments, redirect, screens
+import backup, config, db, monitor, panel, payments, redirect, screens
 
 bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -38,6 +38,7 @@ class Track(BaseMiddleware):
 dp.message.outer_middleware(Track())
 dp.callback_query.outer_middleware(Track())
 FILE_IDS = {}   # кэш file_id, чтобы не загружать картинки каждый раз
+WAIT_TOPUP = set()   # пользователи, от которых ждём сумму пополнения
 
 def photo(name):
     return FILE_IDS.get(name) or FSInputFile(name)
@@ -68,6 +69,9 @@ async def screen_for(key, uid):
     if key == "profile": return screens.profile(u)
     if key == "friends": return screens.friends(u)
     if key == "support": return screens.support(u)
+    if key == "partner": return screens.partner(u)
+    if key == "topup":
+        WAIT_TOPUP.add(uid); return screens.topup(u)
     if key == "connect":
         sub = await panel.ensure_user(uid) if u["sub_until"] > time.time() else None
         return screens.connect(u, sub)
@@ -75,11 +79,13 @@ async def screen_for(key, uid):
 
 @dp.message(CommandStart())
 async def cmd_start(m: Message, command: CommandObject):
-    ref = None
+    ref = src = None
     if command.args and command.args.startswith("ref_"):
         try: ref = int(command.args[4:])
         except ValueError: pass
-    WAIT_PROMO.discard(m.from_user.id); db.get_user(m.from_user.id, ref); track(m.from_user)
+    elif command.args and command.args.startswith("src_") and db.src_get(command.args[4:]):
+        src = command.args[4:]
+    WAIT_PROMO.discard(m.from_user.id); WAIT_TOPUP.discard(m.from_user.id); db.get_user(m.from_user.id, ref, src); track(m.from_user)
     if command.args and command.args.startswith("gift_"):
         uid = m.from_user.id
         status, days, until = db.use_promo(uid, command.args[5:])
@@ -89,7 +95,7 @@ async def cmd_start(m: Message, command: CommandObject):
         return await show(m, screens.promo_bad(db.get_user(uid), status))
     await show(m, await screen_for("start", m.from_user.id))
 
-@dp.message(Command("connect", "plans", "profile", "friends", "support"))
+@dp.message(Command("connect", "plans", "profile", "friends", "support", "topup", "partner"))
 async def cmd_screen(m: Message, command: CommandObject):
     await show(m, await screen_for(command.command, m.from_user.id))
 
@@ -99,7 +105,7 @@ async def cmd_help(m: Message):
 
 @dp.callback_query(F.data.startswith("go:"))
 async def cb_go(c: CallbackQuery):
-    WAIT_PROMO.discard(c.from_user.id)
+    WAIT_PROMO.discard(c.from_user.id); WAIT_TOPUP.discard(c.from_user.id)
     await show(c, await screen_for(c.data[3:], c.from_user.id)); await c.answer()
 
 @dp.callback_query(F.data == "trial")
@@ -145,16 +151,18 @@ async def cb_paybal(c: CallbackQuery):
         await show(c, screens.success(db.get_user(c.from_user.id), val))
     await c.answer("Оплачено с баланса")
 
-WAIT_EMAIL = {}   # user_id -> (plan, method, gift): ждём email для чека
+WAIT_EMAIL = {}   # user_id -> (plan, method, gift, amount): ждём email для чека
 
-def done_screen(uid, until, code):
-    """Экран после оплаты: подарок (код) или обычная подписка."""
+def done_screen(uid, until, code, plan=None):
+    """Экран после оплаты: пополнение баланса, подарок (код) или обычная подписка."""
     u = db.get_user(uid)
+    if plan == "topup": return screens.topup_ok(u)
     return screens.gift_ready(u, code) if code else screens.success(u, until)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-async def finalize_if_paid(pid):
-    """Проверяет платёж в ЮKassa. True, если платёж завершён (оплачен или отменён)."""
+async def finalize_if_paid(pid, quiet=False):
+    """Проверяет платёж в ЮKassa. True, если платёж завершён (оплачен или отменён).
+    quiet=True: отмену не обрабатываем (нужно фоновой проверке, чтобы не ломать напоминания о брошенных оплатах)."""
     p = db.get_payment(pid)
     if p is None: return True
     if p["status"] == "paid": return True
@@ -170,16 +178,30 @@ async def finalize_if_paid(pid):
         if res:
             uid, plan, until, code = res
             if until: await panel.set_expiry(uid, until)
-            name, text, markup = done_screen(uid, until, code)
+            name, text, markup = done_screen(uid, until, code, plan)
             msg = await bot.send_photo(uid, photo(name), caption=text, reply_markup=markup)
             remember(name, msg)
         return True
     if st == "canceled":
-        db.cancel_payment(pid)
-        name, text, markup = screens.error(db.get_user(p["user_id"]))
-        await bot.send_photo(p["user_id"], photo(name), caption=text, reply_markup=markup)
+        if quiet: return False
+        if db.cancel_payment(pid):   # уведомляем один раз, даже если вебхук и опрос сработали одновременно
+            name, text, markup = screens.error(db.get_user(p["user_id"]))
+            await bot.send_photo(p["user_id"], photo(name), caption=text, reply_markup=markup)
         return True
     return False
+
+async def payment_sweep():
+    """Раз в 5 минут добирает оплаты, которые пришли позже, чем закончился опрос watch (20 минут) или бот перезапускался."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            for p in db.pending_payments():
+                if time.time() - p["created"] < 20 * 60: continue
+                try: await finalize_if_paid(p["id"], quiet=True)
+                except Exception: logging.exception("sweep payment %s", p["id"])
+                await asyncio.sleep(0.2)
+        except Exception:
+            logging.exception("payment_sweep")
 
 async def watch(pid):
     """Опрашивает ЮKassa каждые 5 секунд до 20 минут (вебхук не нужен)."""
@@ -188,15 +210,15 @@ async def watch(pid):
         await asyncio.sleep(5)
         if await finalize_if_paid(pid): return
 
-async def start_payment(target, uid, plan, method, gift=False):
+async def start_payment(target, uid, plan, method, gift=False, amount=None):
     u = db.get_user(uid)
     if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not u["email"]:
-        WAIT_EMAIL[uid] = (plan, method, gift)
+        WAIT_EMAIL[uid] = (plan, method, gift, amount)
         msg = target.message if isinstance(target, CallbackQuery) else target
         await msg.answer("Пришли свой email. На него придёт чек об оплате.")
         return
     try:
-        pid, url = await payments.create_invoice(uid, plan, method, u["email"], gift)
+        pid, url = await payments.create_invoice(uid, plan, method, u["email"], gift, amount)
     except Exception:
         logging.exception("invoice failed"); await show(target, screens.error(u))
         await alert_once("yk_invoice", "🔴 Не удалось создать счёт в ЮKassa (см. логи). Проверь YK_SHOP_ID, YK_SECRET и баланс магазина.")
@@ -215,6 +237,35 @@ async def cb_pay(c: CallbackQuery):
         return await c.answer()
     await start_payment(c, c.from_user.id, plan, method, gift); await c.answer()
 
+def _topup_ok(amount):
+    return config.TOPUP_MIN <= amount <= config.TOPUP_MAX
+
+@dp.callback_query(F.data.startswith("topup:"))
+async def cb_topup_pick(c: CallbackQuery):
+    try: amount = int(c.data.split(":")[1])
+    except ValueError: return await c.answer()
+    if not _topup_ok(amount): return await c.answer()
+    WAIT_TOPUP.discard(c.from_user.id)
+    await show(c, screens.topup_pay(db.get_user(c.from_user.id), amount)); await c.answer()
+
+@dp.callback_query(F.data.startswith("tpay:"))
+async def cb_tpay(c: CallbackQuery):
+    try:
+        _, a, method = c.data.split(":"); amount = int(a)
+    except ValueError: return await c.answer()
+    if not _topup_ok(amount) or method not in ("sbp", "card", "any"): return await c.answer()
+    await start_payment(c, c.from_user.id, "topup", method, False, amount); await c.answer()
+
+@dp.message(F.text, lambda m: m.from_user.id in WAIT_TOPUP and not m.text.startswith("/"))
+async def got_topup(m: Message):
+    uid = m.from_user.id
+    try: amount = int(float(m.text.replace(",", ".").replace("₽", "").replace(" ", "").strip()))
+    except ValueError: amount = 0
+    if not _topup_ok(amount):
+        return await m.answer(f"Пришли сумму числом, от {config.TOPUP_MIN} до {config.TOPUP_MAX} ₽.")
+    WAIT_TOPUP.discard(uid)
+    await show(m, screens.topup_pay(db.get_user(uid), amount))
+
 @dp.callback_query(F.data.startswith("chk:"))
 async def cb_chk(c: CallbackQuery):
     if await finalize_if_paid(int(c.data[4:])):
@@ -228,8 +279,8 @@ async def got_email(m: Message):
     if not EMAIL_RE.match(email):
         return await m.answer("Не похоже на email. Пришли адрес вида name@mail.ru")
     db.set_email(m.from_user.id, email)
-    plan, method, gift = WAIT_EMAIL.pop(m.from_user.id)
-    await start_payment(m, m.from_user.id, plan, method, gift)
+    plan, method, gift, amount = WAIT_EMAIL.pop(m.from_user.id)
+    await start_payment(m, m.from_user.id, plan, method, gift, amount)
 
 @dp.callback_query(F.data.startswith("devpay:"))
 async def cb_devpay(c: CallbackQuery):
@@ -239,7 +290,7 @@ async def cb_devpay(c: CallbackQuery):
     if res:
         uid, plan, until, code = res
         if until: await panel.set_expiry(uid, until)
-        await show(c, done_screen(uid, until, code))
+        await show(c, done_screen(uid, until, code, plan))
     await c.answer()
 
 WAIT_PROMO = set()   # пользователи, от которых ждём промокод
@@ -303,14 +354,22 @@ async def fill_profiles(rows):
             db.touch_user(uid, "", "(профиль недоступен)")
     return [db.peek_user(r["id"]) or r for r in rows]
 
-async def send_lines(m, header, lines, footer=""):
-    """Шлёт длинный список несколькими сообщениями."""
+async def send_lines(m, header, lines, footer="", markup=None):
+    """Шлёт длинный список несколькими сообщениями. Кнопки (markup) крепятся к последнему."""
     chunk = header + "\n\n"
     for line in lines:
         if len(chunk) + len(line) + 1 > 3800:
             await m.answer(chunk, disable_web_page_preview=True); chunk = ""
         chunk += line + "\n"
-    await m.answer(chunk + footer, disable_web_page_preview=True)
+    await m.answer(chunk + footer, disable_web_page_preview=True, reply_markup=markup)
+
+def card_buttons(rows, limit=10):
+    """Кнопки «открыть карточку» под списком людей (по две в ряд)."""
+    btns = []
+    for u in rows[:limit]:
+        label = (u["name"] or ("@" + u["username"] if u["username"] else str(u["id"])))[:18]
+        btns.append((f"👤 {label}", f"adm:open:{u['id']}"))
+    return screens.kb(*[btns[i:i + 2] for i in range(0, len(btns), 2)]) if btns else None
 
 def resolve_user(arg):
     """ID или @username -> строка пользователя (без создания). None, если не нашли или неоднозначно."""
@@ -326,12 +385,12 @@ NOT_FOUND = "Не нашёл такого пользователя. Укажи �
 
 @dp.message(Command("promo"))
 async def cmd_promo(m: Message):
-    WAIT_PROMO.add(m.from_user.id)
+    WAIT_PROMO.add(m.from_user.id); WAIT_TOPUP.discard(m.from_user.id)
     await show(m, screens.promo_prompt(db.get_user(m.from_user.id)))
 
 @dp.callback_query(F.data == "promo")
 async def cb_promo(c: CallbackQuery):
-    WAIT_PROMO.add(c.from_user.id)
+    WAIT_PROMO.add(c.from_user.id); WAIT_TOPUP.discard(c.from_user.id)
     await show(c, screens.promo_prompt(db.get_user(c.from_user.id))); await c.answer()
 
 @dp.message(F.text, lambda m: m.from_user.id in WAIT_PROMO and not m.text.startswith("/"))
@@ -448,7 +507,7 @@ async def cmd_abandoned(m: Message):
         return await m.answer("За последние сутки брошенных оплат нет.")
     lines = []
     for r in rows:
-        plan = config.PLANS.get(r["plan"], (0, 0, r["plan"]))[2]
+        plan = config.plan_name(r["plan"])
         lines.append(f'{tfmt(r["created"], "%d.%m %H:%M")} · {r["amount"]} ₽ · {plan}' + (" · подарок" if r["gift"] else "")
                      + (" · напомнили" if r["nudged"] else "") + f'\n   {who(r)} · <code>{r["user_id"]}</code>')
     await send_lines(m, f"<b>Брошенные оплаты за сутки ({len(rows)})</b>", lines)
@@ -552,44 +611,104 @@ async def cmd_forecast(m: Message):
                    f"Для сравнения: за последние 7 дней оплат деньгами на {f['last']:.0f} ₽.\n"
                    "Это оценка по прошлым тарифам, без учёта скидок и новых покупателей.")
 
+REFUND_BAD = {"not_found": "Платёж не найден.", "not_paid": "Этот платёж не в статусе «оплачен» (может быть, уже возвращён).",
+              "gift_used": "Подарок уже активирован другом, вернуть его нельзя.",
+              "topup_spent": "Человек уже потратил часть этого пополнения, на балансе не хватает денег. Сначала спиши лишнее вручную (кнопка «Баланс ±» в карточке) или верни деньги через кабинет ЮKassa."}
+REFUNDING = set()   # платежи, по которым возврат идёт прямо сейчас (защита от двойного нажатия)
+REFUND_CONFIRM = lambda pid: screens.kb([("✅ Подтвердить возврат", f"rfy:{pid}")], [("Отмена", "rfn")])
+
+def _refund_effects(p, info):
+    effects = [("деньги вернутся на основной баланс человека" if p["method"] == "balance" else
+                ("тестовый платёж: деньги не возвращаются" if (config.DEV_PAY or not p["yk_id"]) else "деньги вернутся через ЮKassa на тот же способ оплаты"))]
+    if p["plan"] == "topup":
+        effects.append(f"с основного баланса человека спишется {info['topup']:.0f} ₽ (пополнение вместе с бонусом)")
+    elif p["gift"]:
+        effects.append("подарочный код будет удалён" + (f" ({info['gift_code']})" if info.get("gift_code") else ""))
+    else:
+        effects.append(f"у человека уберётся {info['days']} дн. подписки (до {dfmt(info['new_until']) if info['new_until'] else '-'})")
+        if info.get("ref"): effects.append(f"у пригласившего ({info['ref']}) спишется бонус {info['bonus']:.0f} ₽")
+    return effects
+
+def refund_preview(pid):
+    """(платёж или None, текст). Если вернуть нельзя, платёж None, а в тексте причина."""
+    st, p, info = db.refund_plan(pid)
+    if st != "ok":
+        return None, REFUND_BAD[st]
+    u = db.peek_user(p["user_id"])
+    how = "с баланса" if p["method"] == "balance" else p["method"]
+    head = f"Платёж #{pid}: {p['amount']} ₽ · {config.plan_name(p['plan'])} · {how}" + (f"\n{who(u)}" if u else "")
+    return p, head + "\n\nЧто произойдёт:\n- " + "\n- ".join(_refund_effects(p, info))
+
+async def refund_run(pid, actor):
+    """Делает возврат. actor: Message или CallbackQuery (для журнала). Возвращает текст для админа."""
+    if pid in REFUNDING:
+        return "Возврат уже выполняется."
+    REFUNDING.add(pid)
+    try:
+        st, p, info = db.refund_plan(pid)
+        if st != "ok":
+            return REFUND_BAD[st]
+        u = db.peek_user(p["user_id"])
+        effects = _refund_effects(p, info)
+        if p["method"] != "balance" and p["yk_id"] and not config.DEV_PAY:
+            try:
+                await payments.refund(p["yk_id"], p["amount"], u["email"] if u else None, config.plan_name(p["plan"]))
+            except Exception as e:
+                logging.exception("refund failed")
+                return f"ЮKassa не приняла возврат, в боте ничего не изменено.\n{html.escape(str(e))}"
+        st, info = db.apply_refund(pid)
+        if st != "ok":
+            return "Платёж уже изменился, пока шёл возврат. Если деньги в ЮKassa вернулись, проверь платёж вручную в карточке человека."
+        if not p["gift"] and p["plan"] != "topup":
+            await panel.set_expiry(p["user_id"], info["new_until"])
+        alog(actor, "refund", pid, f"{p['amount']} ₽, человек {p['user_id']}")
+        return "Готово. Возврат выполнен.\n- " + "\n- ".join(effects)
+    finally:
+        REFUNDING.discard(pid)
+
 @dp.message(Command("refund"), is_admin)
 async def cmd_refund(m: Message, command: CommandObject):
     a = (command.args or "").split()
     try: pid = int(a[0])
     except Exception:
-        return await m.answer("Формат: /refund НОМЕР_ПЛАТЕЖА\nНомер платежа смотри в /payments и в /user. Сначала покажу, что изменится, потом попрошу подтвердить.")
-    st, p, info = db.refund_plan(pid)
-    bad = {"not_found": "Платёж не найден.", "not_paid": "Этот платёж не в статусе «оплачен» (может быть, уже возвращён).",
-           "gift_used": "Подарок уже активирован другом, вернуть его нельзя."}
-    if st != "ok":
-        return await m.answer(bad[st])
-    u = db.peek_user(p["user_id"])
-    plan = config.PLANS.get(p["plan"], (0, 0, p["plan"]))[2]
-    how = "с баланса" if p["method"] == "balance" else p["method"]
-    effects = []
-    effects.append("деньги вернутся на основной баланс человека" if p["method"] == "balance" else
-                   ("тестовый платёж: деньги не возвращаются" if (config.DEV_PAY or not p["yk_id"]) else "деньги вернутся через ЮKassa на тот же способ оплаты"))
-    if p["gift"]:
-        effects.append("подарочный код будет удалён" + (f" ({info['gift_code']})" if info.get("gift_code") else ""))
-    else:
-        effects.append(f"у человека уберётся {info['days']} дн. подписки (до {dfmt(info['new_until']) if info['new_until'] else '-'})")
-        if info.get("ref"): effects.append(f"у пригласившего ({info['ref']}) спишется бонус {info['bonus']:.0f} ₽")
-    head = f"Платёж #{pid}: {p['amount']} ₽ · {plan} · {how}" + (f"\n{who(u)}" if u else "")
-    if "да" not in [x.lower() for x in a[1:]]:
-        return await m.answer(head + "\n\nЧто произойдёт:\n- " + "\n- ".join(effects) + f"\n\nПодтвердить: /refund {pid} да", disable_web_page_preview=True)
-    if p["method"] != "balance" and p["yk_id"] and not config.DEV_PAY:
-        try:
-            await payments.refund(p["yk_id"], p["amount"], u["email"] if u else None, plan)
-        except Exception as e:
-            logging.exception("refund failed")
-            return await m.answer(f"ЮKassa не приняла возврат, в боте ничего не изменено.\n{html.escape(str(e))}")
-    st, info = db.apply_refund(pid)
-    if st != "ok":
-        return await m.answer("Платёж уже изменился, пока шёл возврат. Если деньги в ЮKassa вернулись, проверь платёж вручную: /user " + str(p["user_id"]))
-    if not p["gift"]:
-        await panel.set_expiry(p["user_id"], info["new_until"])
-    alog(m, "refund", pid, f"{p['amount']} ₽, человек {p['user_id']}")
-    await m.answer("Готово. Возврат выполнен.\n- " + "\n- ".join(effects), disable_web_page_preview=True)
+        return await m.answer("Возврат делается кнопкой «↩️ Возврат» в карточке человека (/user) и в списке оплат (/payments).\nЕсли знаешь номер платежа: /refund НОМЕР.")
+    if "да" in [x.lower() for x in a[1:]]:
+        return await m.answer(await refund_run(pid, m), disable_web_page_preview=True)
+    p, text = refund_preview(pid)
+    await m.answer(text, reply_markup=REFUND_CONFIRM(pid) if p else None, disable_web_page_preview=True)
+
+def _pid(data):
+    try: return int(data.split(":")[1])
+    except (IndexError, ValueError): return None
+
+@dp.callback_query(F.data.startswith("rf:"))
+async def cb_rf(c: CallbackQuery):
+    if c.from_user.id not in config.ADMIN_IDS:
+        return await c.answer("Только для владельца", show_alert=True)
+    pid = _pid(c.data)
+    if pid is None: return await c.answer()
+    p, text = refund_preview(pid)
+    await c.message.answer(text, reply_markup=REFUND_CONFIRM(pid) if p else None, disable_web_page_preview=True)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("rfy:"))
+async def cb_rfy(c: CallbackQuery):
+    if c.from_user.id not in config.ADMIN_IDS:
+        return await c.answer("Только для владельца", show_alert=True)
+    pid = _pid(c.data)
+    if pid is None: return await c.answer()
+    await c.answer("Делаю возврат…")
+    text = await refund_run(pid, c)
+    try:
+        await c.message.edit_text(text, reply_markup=None, disable_web_page_preview=True)
+    except TelegramBadRequest:
+        await c.message.answer(text, disable_web_page_preview=True)
+
+@dp.callback_query(F.data == "rfn")
+async def cb_rfn(c: CallbackQuery):
+    try: await c.message.edit_text("Возврат отменён.", reply_markup=None)
+    except TelegramBadRequest: pass
+    await c.answer()
 
 @dp.message(Command("delpromo"), is_admin)
 async def cmd_delpromo(m: Message, command: CommandObject):
@@ -657,7 +776,7 @@ async def cmd_users(m: Message, command: CommandObject):
     lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
     pages = (total + size - 1) // size
     tail = f"\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
-    await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail)
+    await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail, card_buttons(rows))
 
 @dp.message(Command("find"), can_support)
 async def cmd_find(m: Message, command: CommandObject):
@@ -670,15 +789,15 @@ async def cmd_find(m: Message, command: CommandObject):
     if not rows:
         return await m.answer("Никого не нашёл." + note)
     lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
-    await send_lines(m, f"<b>Найдено: {len(rows)}</b>", lines, note)
+    await send_lines(m, f"<b>Найдено: {len(rows)}</b>", lines, note, card_buttons(rows))
 
-@dp.message(Command("user"), can_support)
-async def cmd_user(m: Message, command: CommandObject):
-    if not (command.args or "").strip():
-        return await m.answer("Формат: /user ID или @ник\nПример: /user 123456789")
-    u = resolve_user(command.args)
+NOT_FOUND_CARD = "Пользователь не найден."
+
+async def build_card(uid, viewer):
+    """Текст и кнопки карточки человека. Кнопки зависят от роли: владелец видит всё, поддержка только выдачу дней и сообщение."""
+    u = db.peek_user(uid)
     if not u:
-        return await m.answer(NOT_FOUND)
+        return NOT_FOUND_CARD, None
     u = (await fill_profiles([u]))[0]
     uid = u["id"]
     n_fr, earned, _ = db.friends_stats(uid)
@@ -687,6 +806,8 @@ async def cmd_user(m: Message, command: CommandObject):
     if u["banned"]: L.append("⛔ Заблокирован")
     L.append(f'Пробник: {"использован" if u["trial_used"] else "не брал"}')
     L.append(f'Регистрация: {tfmt(u["created"])}' if u["created"] else "Регистрация: неизвестно")
+    if u["src"]:
+        _s = db.src_get(u["src"]); L.append("Источник: " + html.escape(_s["title"] if _s else u["src"]))
     L.append(f'Баланс: основной {u["topup"] or 0:.0f} ₽, реферальный {u["balance"] or 0:.0f} ₽')
     if u["ref"]:
         r = db.peek_user(u["ref"])
@@ -698,7 +819,7 @@ async def cmd_user(m: Message, command: CommandObject):
     if pays:
         L.append("\nПоследние оплаты:")
         for p in pays:
-            plan = config.PLANS.get(p["plan"], (0, 0, p["plan"]))[2]
+            plan = config.plan_name(p["plan"])
             L.append(f'• {tfmt(p["created"])} · {p["amount"]} ₽ · {plan} · {"с баланса" if p["method"] == "balance" else p["method"]}')
     info = await panel.get_info(uid)
     if info:
@@ -711,7 +832,287 @@ async def cmd_user(m: Message, command: CommandObject):
             L.append(f'Лимит устройств: {info["hwidDeviceLimit"]}')
     elif config.PANEL_URL:
         L.append("\nПанель: пользователя там нет или она недоступна.")
-    await m.answer("\n".join(L), disable_web_page_preview=True)
+    owner = viewer in config.ADMIN_IDS
+    rows = [[(f"+{d} дн.", f"adm:give:{uid}:{d}") for d in (7, 30) if owner or d <= config.SUPPORT_GIVE_MAX] + [("Свои дни", f"adm:days:{uid}")]]
+    if owner:
+        rows.append([("✅ Разблокировать" if u["banned"] else "⛔ Заблокировать", f"adm:{'unban' if u['banned'] else 'ban'}:{uid}"),
+                     ("💰 Баланс ±", f"adm:bal:{uid}")])
+    rows.append([("✉️ Написать", f"adm:msg:{uid}"), ("🔄 Обновить", f"adm:card:{uid}")])
+    if owner:
+        for p in pays[:3]:
+            rows.append([(f"↩️ Возврат #{p['id']} · {p['amount']} ₽ · {tfmt(p['created'], '%d.%m')}", f"rf:{p['id']}")])
+    return "\n".join(L), screens.kb(*rows)
+
+@dp.message(Command("user"), can_support)
+async def cmd_user(m: Message, command: CommandObject):
+    if not (command.args or "").strip():
+        return await m.answer("Формат: /user ID или @ник\nПример: /user 123456789")
+    u = resolve_user(command.args)
+    if not u:
+        return await m.answer(NOT_FOUND)
+    text, markup = await build_card(u["id"], m.from_user.id)
+    await m.answer(text, reply_markup=markup, disable_web_page_preview=True)
+
+# ---------- источники трафика и партнёры ----------
+SRC_WIZ = {}   # id админа -> состояние мастера создания и правки ссылок
+
+def _can_src_view(uid): return uid in config.ADMIN_IDS or uid in config.ACCOUNTANT_IDS
+
+def src_link(code): return f"https://t.me/{config.BOT_USERNAME}?start=src_{code}"
+
+def src_list_screen(viewer):
+    rows = db.src_list()
+    lines = []
+    for s in rows:
+        st = db.src_stats(s["code"])
+        tail = f" · партнёру {s['percent']:.0f}%" if s["percent"] else ""
+        lines.append(f"<b>{html.escape(s['title'])}</b>: {st['regs']} рег., {st['payers']} оплатили, {st['revenue']:.0f} ₽{tail}")
+    text = "<b>Источники трафика</b>\n\n" + ("\n".join(lines) if lines else
+        "Пока нет ни одной ссылки. Создай ссылку для блогера или рекламы, и бот покажет регистрации, оплаты и выручку по каждой.")
+    btns = [(s["title"][:18], f"src:open:{s['code']}") for s in rows[:20]]
+    kbrows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    if viewer in config.ADMIN_IDS: kbrows.append([("➕ Новая ссылка", "src:new")])
+    return text, (screens.kb(*kbrows) if kbrows else None)
+
+def source_card(code, viewer):
+    s = db.src_get(code)
+    if not s: return None, None
+    st = db.src_stats(code)
+    owner = db.peek_user(s["owner_id"]) if s["owner_id"] else None
+    L = [f"<b>{html.escape(s['title'])}</b>", f"Ссылка: <code>{src_link(code)}</code>"]
+    if s["owner_id"] and s["percent"]:
+        L.append(f"Партнёр: {who(owner) if owner else s['owner_id']} · {s['percent']:.0f}% с каждой оплаты")
+    else:
+        L.append("Партнёра нет, ссылка только для статистики")
+    conv = st["payers"] / st["regs"] * 100 if st["regs"] else 0
+    L += ["", f"Регистраций: {st['regs']}", f"Взяли пробник: {st['trials']}", f"Подписка активна сейчас: {st['active']}",
+          f"Оплатили: {st['payers']} чел., оплат {st['pay_n']} на {st['revenue']:.0f} ₽ (конверсия {conv:.0f}%)",
+          f"Партнёру начислено: {st['earned']:.0f} ₽"]
+    rows = []
+    if viewer in config.ADMIN_IDS:
+        rows += [[("✏️ Название", f"src:ren:{code}"), ("% партнёру", f"src:pct:{code}")],
+                 [("👤 Партнёр", f"src:own:{code}"), ("🗑 Удалить", f"src:del:{code}")]]
+    rows.append([("← К списку", "src:list")])
+    return "\n".join(L), screens.kb(*rows)
+
+SRC_PROMPTS = {"ren": "Пришли новое название ссылки. Отмена: «отмена».",
+               "pct": "Какой процент от оплат отдавать партнёру? Число от 0 до 90 (0 = просто метка для статистики). Отмена: «отмена».",
+               "own": "Пришли Telegram ID или @username партнёра. Он должен хотя бы раз написать боту. «0» убрать партнёра. Отмена: «отмена»."}
+
+@dp.message(Command("sources"), can_stats)
+async def cmd_sources(m: Message):
+    text, mk = src_list_screen(m.from_user.id)
+    await m.answer(text, reply_markup=mk, disable_web_page_preview=True)
+
+async def _edit_or_send(c, text, mk):
+    try:
+        await c.message.edit_text(text, reply_markup=mk, disable_web_page_preview=True)
+    except TelegramBadRequest:
+        await c.message.answer(text, reply_markup=mk, disable_web_page_preview=True)
+
+@dp.callback_query(F.data.startswith("src:"))
+async def cb_src(c: CallbackQuery):
+    me = c.from_user.id
+    if not _can_src_view(me):
+        return await c.answer("Нет доступа", show_alert=True)
+    owner = me in config.ADMIN_IDS
+    parts = c.data.split(":"); act = parts[1]; code = parts[2] if len(parts) > 2 else None
+    if act == "list":
+        text, mk = src_list_screen(me); await _edit_or_send(c, text, mk)
+    elif act == "open":
+        text, mk = source_card(code, me)
+        if text is None: return await c.answer("Ссылка не найдена", show_alert=True)
+        await _edit_or_send(c, text, mk)
+    elif not owner:
+        return await c.answer("Только для владельца", show_alert=True)
+    elif act == "new":
+        ADM_WAIT.pop(me, None); SRC_WIZ[me] = {"step": "title", "ts": time.time()}
+        await c.message.answer("Как назвать ссылку? Например: «Вася YouTube» или «Реклама ТГ-канал». Отмена: «отмена».")
+    elif act in ("ren", "pct", "own"):
+        if not db.src_get(code): return await c.answer("Ссылка не найдена", show_alert=True)
+        ADM_WAIT.pop(me, None); SRC_WIZ[me] = {"step": "edit" + act, "code": code, "ts": time.time()}
+        await c.message.answer(SRC_PROMPTS[act])
+    elif act == "del":
+        s = db.src_get(code)
+        if not s: return await c.answer("Ссылка не найдена", show_alert=True)
+        await _edit_or_send(c, f"Удалить ссылку «{html.escape(s['title'])}»?\nЛюди, которые пришли по ней, останутся, но статистика по ссылке пропадёт, а партнёру перестанут начисляться деньги.",
+                            screens.kb([("Да, удалить", f"src:delok:{code}")], [("Отмена", f"src:open:{code}")]))
+    elif act == "delok":
+        db.src_delete(code); alog(c, "src_delete", code)
+        text, mk = src_list_screen(me); await _edit_or_send(c, text, mk)
+    await c.answer()
+
+async def _notify_partner(owner_id, code):
+    s = db.src_get(code)
+    if not (s and owner_id and s["percent"]): return
+    try:
+        await bot.send_message(owner_id, f"🤝 Тебе открыта партнёрская ссылка «{html.escape(s['title'])}»: {s['percent']:.0f}% с каждой оплаты пришедших по ней людей.\n\n"
+                                         f"<code>{src_link(code)}</code>\n\nСтатистика: Профиль → Партнёрка (или /partner).")
+    except Exception:
+        logging.warning("партнёру %s не отправилось уведомление", owner_id)
+
+@dp.message(F.text, lambda m: m.from_user.id in SRC_WIZ and not m.text.startswith("/"))
+async def got_src_wiz(m: Message):
+    me = m.from_user.id; w = SRC_WIZ[me]; txt = m.text.strip()
+    if time.time() - w["ts"] > 900:
+        SRC_WIZ.pop(me); return await m.answer("Время ввода вышло. Начни заново кнопкой в /sources.")
+    if txt.lower() in ("отмена", "cancel"):
+        SRC_WIZ.pop(me); return await m.answer("Отменено.")
+    if me not in config.ADMIN_IDS:
+        SRC_WIZ.pop(me); return await m.answer("Нет доступа.")
+    w["ts"] = time.time(); step = w["step"]; code = w.get("code")
+
+    async def finish(code):
+        SRC_WIZ.pop(me, None)
+        text, mk = source_card(code, me)
+        await m.answer(text, reply_markup=mk, disable_web_page_preview=True)
+
+    if step in ("title", "editren"):
+        title = txt[:40]
+        if step == "title":
+            w.update(title=title, step="pct")
+            return await m.answer("Какой процент от оплат отдавать партнёру? Число от 0 до 90. Если ссылка просто для статистики (без партнёра), пришли 0.")
+        db.src_update(code, title=title); alog(m, "src_rename", code, title)
+        return await finish(code)
+    if step in ("pct", "editpct"):
+        try:
+            pct = float(txt.replace(",", ".").replace("%", "").strip()); assert 0 <= pct <= 90
+        except Exception:
+            return await m.answer("Нужно число от 0 до 90, например 20.")
+        if step == "pct":
+            if pct == 0:
+                code = db.src_create(w["title"], 0, None); alog(m, "src_new", code, w["title"])
+                return await finish(code)
+            w.update(pct=pct, step="owner")
+            return await m.answer("Пришли Telegram ID или @username партнёра. Он должен хотя бы раз написать боту.")
+        db.src_update(code, percent=pct); alog(m, "src_percent", code, f"{pct:.0f}%")
+        await finish(code)
+        s = db.src_get(code)
+        if pct and not s["owner_id"]:
+            await m.answer("Партнёр не задан: нажми «👤 Партнёр», иначе деньги начисляться не будут.")
+        return
+    if step in ("owner", "editown"):
+        if txt in ("0", "нет") and step == "editown":
+            db.src_update(code, owner_id=None); alog(m, "src_owner", code, "убран")
+            return await finish(code)
+        u = resolve_user(txt)
+        if not u:
+            return await m.answer(NOT_FOUND)
+        if step == "owner":
+            code = db.src_create(w["title"], w["pct"], u["id"]); alog(m, "src_new", code, f"{w['title']} · {w['pct']:.0f}% · партнёр {u['id']}")
+        else:
+            db.src_update(code, owner_id=u["id"]); alog(m, "src_owner", code, str(u["id"]))
+        await finish(code)
+        await _notify_partner(u["id"], code)
+
+ADM_WAIT = {}   # id сотрудника -> (действие, id человека, время): ждём число или текст после нажатия кнопки
+
+def _staff(uid): return uid in config.ADMIN_IDS or uid in config.SUPPORT_IDS
+
+async def do_give(actor, uid, days, silent=False):
+    """Выдаёт дни. actor: Message или CallbackQuery. Возвращает короткий текст результата."""
+    if actor.from_user.id not in config.ADMIN_IDS and days > config.SUPPORT_GIVE_MAX:
+        return f"Поддержка может выдавать не больше {config.SUPPORT_GIVE_MAX} дн. за раз."
+    until = db.extend(uid, days)
+    alog(actor, "give", uid, f"+{days} дн.")
+    await panel.set_expiry(uid, until)
+    sent = ""
+    if not silent:
+        try:
+            await bot.send_message(uid, f"Вам начислено +{days} дн. Подписка активна до {dfmt(until)}.")
+            sent = " Человеку отправлено сообщение."
+        except Exception:
+            sent = " Сообщение человеку не дошло."
+    return f"Готово: +{days} дн., подписка до {dfmt(until)}." + sent
+
+async def do_ban(actor, uid, flag):
+    if flag and uid in config.ADMIN_IDS:
+        return "Админа заблокировать нельзя."
+    db.set_banned(uid, flag)
+    alog(actor, "ban" if flag else "unban", uid)
+    try:
+        await panel.set_banned(uid)
+        tail = " В панели доступ " + ("отключён." if flag else "восстановлен по сроку подписки.")
+    except Exception:
+        logging.exception("panel ban failed")
+        tail = " В панели не получилось: проверь вручную."
+    return ("⛔ Заблокирован." if flag else "✅ Разблокирован.") + tail
+
+ADM_PROMPTS = {"days": "Сколько дней выдать? Пришли число (например 14). Отмена: напиши «отмена».",
+               "bal": "На сколько изменить основной баланс? Пришли сумму в рублях: 500 пополнит, -200 спишет. Отмена: напиши «отмена».",
+               "msg": "Пришли текст сообщения, я отправлю его человеку от имени бота. Отмена: напиши «отмена»."}
+
+@dp.callback_query(F.data.startswith("adm:"))
+async def cb_adm(c: CallbackQuery):
+    me = c.from_user.id
+    if not _staff(me):
+        return await c.answer("Нет доступа", show_alert=True)
+    parts = c.data.split(":")
+    try: act, tid = parts[1], int(parts[2])
+    except (IndexError, ValueError): return await c.answer()
+    owner = me in config.ADMIN_IDS
+    if db.peek_user(tid) is None:
+        return await c.answer("Пользователь не найден", show_alert=True)
+    toast = None
+    if act == "give":
+        try: days = int(parts[3])
+        except (IndexError, ValueError): return await c.answer()
+        toast = await do_give(c, tid, days)
+    elif act in ("ban", "unban"):
+        if not owner: return await c.answer("Только для владельца", show_alert=True)
+        toast = await do_ban(c, tid, act == "ban")
+    elif act in ("days", "bal", "msg"):
+        if act == "bal" and not owner: return await c.answer("Только для владельца", show_alert=True)
+        ADM_WAIT[me] = (act, tid, time.time())
+        await c.message.answer(ADM_PROMPTS[act])
+        return await c.answer()
+    elif act not in ("card", "open"):
+        return await c.answer()
+    text, markup = await build_card(tid, me)
+    if act == "open":   # из списка людей: карточка приходит новым сообщением, список остаётся
+        await c.message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+        return await c.answer()
+    try:
+        await c.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+    except TelegramBadRequest:
+        pass   # текст не изменился
+    await c.answer((toast or "")[:190] or None)
+
+@dp.message(F.text, lambda m: m.from_user.id in ADM_WAIT and not m.text.startswith("/"))
+async def got_adm_input(m: Message):
+    me = m.from_user.id
+    act, tid, ts = ADM_WAIT.pop(me)
+    txt = m.text.strip()
+    if time.time() - ts > 600:
+        return await m.answer("Время ввода вышло. Нажми кнопку на карточке ещё раз.")
+    if txt.lower() in ("отмена", "cancel"):
+        return await m.answer("Отменено.")
+    if not _staff(me) or (act == "bal" and me not in config.ADMIN_IDS):
+        return await m.answer("Нет доступа.")
+    if act == "days":
+        try:
+            days = int(txt); assert 1 <= days <= 3650
+        except Exception:
+            return await m.answer("Нужно целое число дней от 1 до 3650. Нажми «Свои дни» ещё раз.")
+        res = await do_give(m, tid, days)
+    elif act == "bal":
+        try:
+            amount = float(txt.replace(",", ".").replace("₽", "").replace(" ", ""))
+            assert amount != 0 and abs(amount) <= 100000
+        except Exception:
+            return await m.answer("Нужна сумма в рублях, например 500 или -200. Нажми «Баланс ±» ещё раз.")
+        u = db.add_balance(tid, amount, "main")
+        alog(m, "addbal", tid, f"{amount:+.0f} ₽ (с карточки)")
+        res = f"Готово. Основной баланс: {u['topup']:.0f} ₽, реферальный: {u['balance']:.0f} ₽."
+    else:
+        try:
+            await bot.send_message(tid, "💬 Сообщение от поддержки:\n\n" + txt, parse_mode=None)
+            alog(m, "msg", tid, txt[:80]); res = "Отправлено."
+        except Exception:
+            res = "Не доставилось (возможно, человек заблокировал бота)."
+    await m.answer(res)
+    text, markup = await build_card(tid, me)
+    await m.answer(text, reply_markup=markup, disable_web_page_preview=True)
 
 @dp.message(Command("give"), can_support)
 async def cmd_give(m: Message, command: CommandObject):
@@ -775,10 +1176,14 @@ async def cmd_payments(m: Message, command: CommandObject):
         return await m.answer("Оплат пока нет.")
     lines = []
     for r in rows:
-        plan = config.PLANS.get(r["plan"], (0, 0, r["plan"]))[2]
+        plan = config.plan_name(r["plan"])
         how = "с баланса" if r["method"] == "balance" else r["method"]
-        lines.append(f'{tfmt(r["created"], "%d.%m %H:%M")} · {r["amount"]} ₽ · {plan} · {how}\n   {who(r)} · <code>{r["id"]}</code>')
-    await send_lines(m, f"<b>Последние оплаты ({len(rows)})</b>", lines)
+        lines.append(f'{tfmt(r["created"], "%d.%m %H:%M")} · {r["amount"]} ₽ · {plan} · {how}\n   {who(r)} · ID <code>{r["id"]}</code> · платёж #{r["pid"]}')
+    markup = None
+    if m.from_user.id in config.ADMIN_IDS:
+        btns = [(f"↩️ #{r['pid']} · {r['amount']} ₽", f"rf:{r['pid']}") for r in rows[:10]]
+        markup = screens.kb(*[btns[i:i + 2] for i in range(0, len(btns), 2)])
+    await send_lines(m, f"<b>Последние оплаты ({len(rows)})</b>", lines, markup=markup)
 
 @dp.message(Command("expiring"), can_support)
 async def cmd_expiring(m: Message, command: CommandObject):
@@ -789,7 +1194,7 @@ async def cmd_expiring(m: Message, command: CommandObject):
         return await m.answer(f"В ближайшие {days} дн. подписки ни у кого не заканчиваются.")
     rows = await fill_profiles(rows)
     lines = [f'{who(u)} · <code>{u["id"]}</code> · до {tfmt(u["sub_until"])}' for u in rows]
-    await send_lines(m, f"<b>Заканчивается в ближайшие {days} дн.: {len(rows)}</b>", lines)
+    await send_lines(m, f"<b>Заканчивается в ближайшие {days} дн.: {len(rows)}</b>", lines, markup=card_buttons(rows))
 
 SEGMENTS = {"all": "всем", "active": "с активной подпиской", "expired": "с закончившейся подпиской", "never": "без подписки"}
 BCAST = {}          # id админа -> (сегмент, текст), ждёт подтверждения
@@ -866,7 +1271,7 @@ ADMIN_HELP = (
     "/user ID: карточка человека\n/expiring [дни]: у кого скоро конец подписки\n/payments [N]: последние оплаты\n\n"
     "<b>Управление</b>\n"
     "/give ID ДНИ [тихо]: выдать дни\n/ban ID и /unban ID: заблокировать и разблокировать\n"
-    "/addbal ID СУММА и /addref ID СУММА: баланс\n/balance [ID]: показать баланс\n\n"
+    "/addbal ID СУММА и /addref ID СУММА: баланс\n/balance [ID]: показать баланс\n/backup: бэкап базы мне в чат\n/sources: ссылки для блогеров и рекламы, партнёрский процент, статистика\n\n"
     "<b>Промокоды</b>\n"
     "/newpromo КОД ДНИ [АКТИВАЦИЙ] [ДД.ММ.ГГГГ]\n/newdisc КОД 20% (или 100 ₽) [АКТИВАЦИЙ] [ДД.ММ.ГГГГ]: скидка\n/genpromo ДНИ КОЛ-ВО [ПРЕФИКС] [ДД.ММ.ГГГГ]\n"
     "/promos: список\n/delpromo КОД\n/delallpromo [used] да: удалить все или только использованные\n\n"
@@ -875,7 +1280,7 @@ ADMIN_HELP = (
     "/sale 20% ДД.ММ.ГГГГ ДД.ММ.ГГГГ [название]: акция на все тарифы\n/sales: список акций\n/delsale НОМЕР\n\n"
     "<b>Деньги</b>\n"
     "/profit [дни]: выручка, расходы, прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/delcost НОМЕР\n"
-    "/forecast: сколько может прийти на продлениях за неделю\n/refund НОМЕР_ПЛАТЕЖА: вернуть платёж\n\n"
+    "/forecast: сколько может прийти на продлениях за неделю\nВозврат: кнопка «↩️» в /user и /payments (или /refund НОМЕР)\n\n"
     "<b>Рассылка</b>\n"
     "/broadcast [all|active|expired|never] ТЕКСТ: предпросмотр\n/broadcastok: отправить\n/broadcastcancel: отменить\n\n"
     "<b>Контроль</b>\n"
@@ -886,7 +1291,7 @@ SUPPORT_HELP = ("<b>Тебе доступна поддержка</b>\n\n/find З
                 "/users [стр]: список\n/expiring [дни]: у кого скоро конец подписки\n"
                 f"/give ID ДНИ [тихо]: выдать дни (до {config.SUPPORT_GIVE_MAX} за раз)")
 ACCOUNTANT_HELP = ("<b>Тебе доступна бухгалтерия</b>\n\n/stats: сводка\n/payments [N]: последние оплаты\n/abandoned: брошенные оплаты\n/report: отчёт за сутки\n"
-                   "/profit [дни]: прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/forecast: прогноз продлений")
+                   "/sources: источники трафика\n/profit [дни]: прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/forecast: прогноз продлений")
 
 def _ago(ts): return tfmt(ts, "%d.%m %H:%M")
 
@@ -924,6 +1329,23 @@ async def build_report():
     except Exception as e:
         text += f"🔴 Панель не отвечает: {html.escape(str(e))}"
     return text
+
+async def send_backup(path):
+    size = os.path.getsize(path)
+    for aid in config.ADMIN_IDS:
+        try:
+            if size > 45 * 1024 * 1024:
+                await bot.send_message(aid, f"Бэкап базы сделан ({size // 1048576} МБ), но для Telegram он слишком большой. Файл на сервере: {path}")
+            else:
+                await bot.send_document(aid, FSInputFile(path), caption="Бэкап базы NQYRO. В нём данные клиентов, храни аккуратно.")
+        except Exception:
+            logging.warning("бэкап не дошёл до %s", aid)
+
+@dp.message(Command("backup"), is_admin)
+async def cmd_backup(m: Message):
+    path = await backup.backup_now()
+    await send_backup(path)
+    alog(m, "backup", os.path.basename(path))
 
 @dp.message(Command("report"), can_stats)
 async def cmd_report(m: Message):
@@ -1027,7 +1449,8 @@ async def main():
         BotCommand(command="expiring", description="Скоро закончится подписка"),
         BotCommand(command="payments", description="Последние оплаты"),
         BotCommand(command="give", description="Выдать дни"),
-        BotCommand(command="broadcast", description="Рассылка")]
+        BotCommand(command="broadcast", description="Рассылка"),
+        BotCommand(command="sources", description="Источники трафика и партнёры")]
     for aid in config.ADMIN_IDS:
         try:
             await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=aid))
@@ -1038,15 +1461,19 @@ async def main():
                     BotCommand(command="user", description="Карточка человека"), BotCommand(command="expiring", description="Скоро конец подписки"),
                     BotCommand(command="give", description="Выдать дни")],
         "accountant": [BotCommand(command="admin", description="Команды"), BotCommand(command="stats", description="Статистика"),
-                       BotCommand(command="payments", description="Последние оплаты"), BotCommand(command="report", description="Отчёт за сутки")]}
+                       BotCommand(command="payments", description="Последние оплаты"), BotCommand(command="report", description="Отчёт за сутки"),
+                       BotCommand(command="sources", description="Источники трафика")]}
     for ids, key in ((config.SUPPORT_IDS - config.ADMIN_IDS, "support"), (config.ACCOUNTANT_IDS - config.ADMIN_IDS, "accountant")):
         for aid in ids:
             try:
                 await bot.set_my_commands(public_cmds + role_cmds[key], scope=BotCommandScopeChat(chat_id=aid))
             except Exception:
                 logging.warning("не удалось задать меню для %s", aid)
+    redirect.ON_PAYMENT = finalize_if_paid
     await redirect.start_server()
     asyncio.create_task(reminders())
+    asyncio.create_task(payment_sweep())
+    asyncio.create_task(backup.run(send_backup))
     asyncio.create_task(monitor.run(notify_admins))
     asyncio.create_task(morning_report())
     if config.AUTO_MSGS:

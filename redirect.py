@@ -4,10 +4,13 @@ Telegram не принимает ссылки happ:// и incy:// в кнопка
 {OPEN_BASE}/open/<app>?sub=<ссылка подписки>, а страница уже открывает приложение через deeplink.
 Нужны: WEB_PORT и публичный https-адрес OPEN_BASE (обратный прокси Nginx/Caddy на этот порт).
 """
-import html, logging
+import asyncio, hmac, html, logging
 from urllib.parse import urlparse
 from aiohttp import web
-import config
+import config, db
+
+ON_PAYMENT = None   # сюда bot.py кладёт функцию проверки платежа (она сама сверяется с ЮKassa)
+_tasks = set()
 
 SCHEMES = {"happ": "happ://add/", "incy": "incy://import/"}
 TITLES = {"happ": "Happ", "incy": "Incy"}
@@ -43,6 +46,22 @@ async def open_app(request: web.Request) -> web.Response:
                        sub=html.escape(sub))
     return web.Response(text=body, content_type="text/html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
+async def yk_hook(request: web.Request) -> web.Response:
+    """Вебхук ЮKassa. Данным из тела не верим: бот только узнаёт номер платежа и сам спрашивает статус у ЮKassa."""
+    secret = config.YK_WEBHOOK_SECRET
+    if not secret or not hmac.compare_digest(request.match_info["secret"], secret):
+        return web.Response(status=404)
+    try:
+        data = await request.json()
+        yk_id = (data.get("object") or {}).get("id")
+    except Exception:
+        return web.Response(status=400)
+    p = db.get_payment_by_yk(yk_id) if yk_id else None
+    if p and ON_PAYMENT:
+        t = asyncio.create_task(ON_PAYMENT(p["id"]))
+        _tasks.add(t); t.add_done_callback(_tasks.discard)
+    return web.Response(text="ok")
+
 async def health(request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
@@ -51,7 +70,7 @@ async def start_server():
     if not config.WEB_PORT:
         return None
     app = web.Application()
-    app.add_routes([web.get("/open/{app}", open_app), web.get("/health", health)])
+    app.add_routes([web.get("/open/{app}", open_app), web.get("/health", health), web.post("/yk/{secret}", yk_hook)])
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, config.WEB_HOST, config.WEB_PORT).start()

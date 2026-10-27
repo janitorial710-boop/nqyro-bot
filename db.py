@@ -1,4 +1,4 @@
-import sqlite3, time
+import secrets, sqlite3, time
 import config
 
 con = sqlite3.connect(config.DB_PATH, check_same_thread=False)
@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS costs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, amount REAL, category TEXT, note TEXT);
 """)
 for _sql in ("ALTER TABLE payments ADD COLUMN code TEXT",            # код подарка, созданный этим платежом
-             "ALTER TABLE payments ADD COLUMN refunded_at INTEGER"):
+             "ALTER TABLE payments ADD COLUMN refunded_at INTEGER",
+             "ALTER TABLE payments ADD COLUMN bonus REAL DEFAULT 0"):   # бонус к пополнению баланса
     try:
         con.execute(_sql); con.commit()
     except sqlite3.OperationalError:
@@ -76,7 +77,7 @@ for _sql in ("ALTER TABLE payments ADD COLUMN code TEXT",            # код п
 
 def first_purchase(uid):
     """True, если человек ещё ни разу не оплачивал подписку (подарки не считаются)."""
-    return con.execute("SELECT 1 FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 LIMIT 1", (uid,)).fetchone() is None
+    return con.execute("SELECT 1 FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan!='topup' LIMIT 1", (uid,)).fetchone() is None
 
 def active_sale(now=None):
     now = now or int(time.time())
@@ -110,7 +111,7 @@ def price_for(u, plan, gift=False):
 
 def last_plan(uid):
     """Тариф последней оплаты (не подарок) или None."""
-    r = con.execute("SELECT plan FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 ORDER BY created DESC, id DESC LIMIT 1", (uid,)).fetchone()
+    r = con.execute("SELECT plan FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan!='topup' ORDER BY created DESC, id DESC LIMIT 1", (uid,)).fetchone()
     return r["plan"] if r else None
 
 def create_sale(percent, start, end, title):
@@ -165,6 +166,68 @@ def use_promo(uid, code):
         return ("disc", p["value"], p["kind"])
     return ("ok", p["days"], extend(uid, p["days"]))
 
+# ---------- источники трафика и партнёры ----------
+con.executescript("""
+CREATE TABLE IF NOT EXISTS sources(code TEXT PRIMARY KEY, title TEXT, percent REAL DEFAULT 0, owner_id INTEGER, created INTEGER);
+""")
+for _sql in ("ALTER TABLE users ADD COLUMN src TEXT",              # код источника, откуда человек пришёл (первое касание)
+             "ALTER TABLE payments ADD COLUMN ref_to INTEGER",     # кому начислен бонус за эту оплату
+             "ALTER TABLE payments ADD COLUMN ref_bonus REAL"):    # сколько начислено (хранится, чтобы возврат откатил ровно это)
+    try:
+        con.execute(_sql); con.commit()
+    except sqlite3.OperationalError:
+        pass
+
+def src_get(code):
+    return con.execute("SELECT * FROM sources WHERE code=?", (code,)).fetchone() if code else None
+
+def src_list():
+    return con.execute("SELECT * FROM sources ORDER BY created DESC").fetchall()
+
+def src_create(title, percent=0, owner_id=None):
+    while True:
+        code = "s" + secrets.token_hex(3)
+        if not src_get(code): break
+    con.execute("INSERT INTO sources(code,title,percent,owner_id,created) VALUES(?,?,?,?,?)",
+                (code, title, percent or 0, owner_id, int(time.time()))); con.commit()
+    return code
+
+def src_update(code, **fields):
+    for k, v in fields.items():
+        assert k in ("title", "percent", "owner_id")
+        con.execute(f"UPDATE sources SET {k}=? WHERE code=?", (v, code))
+    con.commit()
+
+def src_delete(code):
+    con.execute("DELETE FROM sources WHERE code=?", (code,)); con.commit()
+
+def src_stats(code, now=None):
+    now = now or int(time.time())
+    q = lambda sql, *a: con.execute(sql, a).fetchone()
+    pay = q("SELECT COUNT(DISTINCT p.user_id), COUNT(*), COALESCE(SUM(p.amount),0) FROM payments p JOIN users u ON u.id=p.user_id "
+            "WHERE u.src=? AND p.status='paid' AND p.method!='balance'", code)
+    return {"regs": q("SELECT COUNT(*) FROM users WHERE src=?", code)[0],
+            "trials": q("SELECT COUNT(*) FROM users WHERE src=? AND trial_used=1", code)[0],
+            "active": q("SELECT COUNT(*) FROM users WHERE src=? AND sub_until>?", code, now)[0],
+            "payers": pay[0], "pay_n": pay[1], "revenue": pay[2],
+            "earned": q("SELECT COALESCE(SUM(p.ref_bonus),0) FROM payments p JOIN users u ON u.id=p.user_id "
+                        "WHERE u.src=? AND p.status='paid' AND p.ref_to IS NOT NULL", code)[0]}
+
+def partner_sources(uid):
+    return con.execute("SELECT * FROM sources WHERE owner_id=? ORDER BY created DESC", (uid,)).fetchall()
+
+def is_partner(uid):
+    return con.execute("SELECT 1 FROM sources WHERE owner_id=? LIMIT 1", (uid,)).fetchone() is not None
+
+def bonus_target(u, amount):
+    """Кому и сколько начислить за оплату человека u: пригласившему друга (REF_PERCENT) или партнёру источника (его процент)."""
+    if u["ref"]:
+        return u["ref"], amount * config.REF_PERCENT / 100
+    s = src_get(u["src"])
+    if s and s["owner_id"] and s["percent"] and s["owner_id"] != u["id"]:
+        return s["owner_id"], amount * s["percent"] / 100
+    return None, 0
+
 def set_yk_id(pid, yk_id):
     con.execute("UPDATE payments SET yk_id=? WHERE id=?", (yk_id, pid)); con.commit()
 
@@ -172,7 +235,12 @@ def get_payment(pid):
     return con.execute("SELECT * FROM payments WHERE id=?", (pid,)).fetchone()
 
 def cancel_payment(pid):
-    con.execute("UPDATE payments SET status='canceled' WHERE id=? AND status='pending'", (pid,)); con.commit()
+    """True, если платёж был в ожидании и мы его отменили (повторный вызов вернёт False)."""
+    cur = con.execute("UPDATE payments SET status='canceled' WHERE id=? AND status='pending'", (pid,)); con.commit()
+    return cur.rowcount > 0
+
+def get_payment_by_yk(yk_id):
+    return con.execute("SELECT * FROM payments WHERE yk_id=?", (yk_id,)).fetchone()
 
 def pending_payments(max_age=86400):
     return con.execute("SELECT * FROM payments WHERE status='pending' AND yk_id IS NOT NULL AND created>?",
@@ -181,11 +249,12 @@ def pending_payments(max_age=86400):
 def set_email(uid, email):
     con.execute("UPDATE users SET email=? WHERE id=?", (email, uid)); con.commit()
 
-def get_user(uid, ref=None):
+def get_user(uid, ref=None, src=None):
     row = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     if row is None:
         ref = ref if ref and ref != uid else None
-        con.execute("INSERT INTO users(id, ref, created) VALUES(?,?,?)", (uid, ref, int(time.time())))
+        src = None if ref else src   # приглашение друга важнее метки источника
+        con.execute("INSERT INTO users(id, ref, src, created) VALUES(?,?,?,?)", (uid, ref, src, int(time.time())))
         con.commit()
         row = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     return row
@@ -210,6 +279,15 @@ def create_payment(uid, plan, method, gift=False):
                       (uid, plan, price, method, "pending", int(time.time()), 1 if gift else 0, disc))
     con.commit(); return cur.lastrowid
 
+def create_topup(uid, amount, method):
+    """Счёт на пополнение основного баланса. Бонус считается сразу и хранится в платеже."""
+    get_user(uid)
+    amount = int(amount)
+    bonus = int(amount * config.TOPUP_BONUS_PERCENT / 100)
+    cur = con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift,bonus) VALUES(?,?,?,?,?,?,0,?)",
+                      (uid, "topup", amount, method, "pending", int(time.time()), bonus))
+    con.commit(); return cur.lastrowid
+
 def complete_payment(pid):
     """Идемпотентно: повторный вызов ничего не делает."""
     cur = con.execute("UPDATE payments SET status='paid' WHERE id=? AND status!='paid'", (pid,))
@@ -217,6 +295,10 @@ def complete_payment(pid):
     if cur.rowcount == 0:
         return None
     p = con.execute("SELECT * FROM payments WHERE id=?", (pid,)).fetchone()
+    if p["plan"] == "topup":   # пополнение баланса: деньги + бонус на основной баланс, реферального бонуса нет
+        add = (p["amount"] or 0) + (p["bonus"] or 0)
+        con.execute("UPDATE users SET topup=COALESCE(topup,0)+? WHERE id=?", (add, p["user_id"])); con.commit()
+        return p["user_id"], "topup", None, None
     code = None
     if p["gift"]:
         code, until = make_gift_code(p["plan"]), None
@@ -225,10 +307,10 @@ def complete_payment(pid):
         until = extend(p["user_id"], config.PLANS[p["plan"]][1])
         if p["disc"]: _clear_disc(p["user_id"], p["disc"]); con.commit()
     u = get_user(p["user_id"])
-    if u["ref"]:
-        bonus = p["amount"] * config.REF_PERCENT / 100
-        con.execute("UPDATE users SET balance=balance+?, ref_earned=ref_earned+? WHERE id=?",
-                    (bonus, bonus, u["ref"])); con.commit()
+    to, bonus = bonus_target(u, p["amount"])
+    if to:
+        con.execute("UPDATE users SET balance=balance+?, ref_earned=ref_earned+? WHERE id=?", (bonus, bonus, to))
+        con.execute("UPDATE payments SET ref_to=?, ref_bonus=? WHERE id=?", (to, bonus, pid)); con.commit()
     return p["user_id"], p["plan"], until, code   # code != None для подарка (until тогда None)
 
 def friends_stats(uid):
@@ -281,7 +363,7 @@ def due_reminders(now, within_days=3):
 
 # ---------- брошенные оплаты ----------
 _ABANDON_SQL = ("SELECT p.*, u.username, u.name FROM payments p JOIN users u ON u.id=p.user_id "
-                "WHERE p.status='pending' AND p.created<? AND p.created>? AND COALESCE(u.banned,0)=0 {extra} "
+                "WHERE p.status='pending' AND p.plan!='topup' AND p.created<? AND p.created>? AND COALESCE(u.banned,0)=0 {extra} "
                 "AND NOT EXISTS (SELECT 1 FROM payments q WHERE q.user_id=p.user_id AND q.status='paid' AND q.created>=p.created) "
                 "ORDER BY p.created DESC")
 
@@ -371,23 +453,38 @@ def report_data(now):
     }
 
 # ---------- возвраты, расходы, прибыль, прогноз ----------
+def _refund_bonus(p, info):
+    """Какой бонус (пригласившему или партнёру) откатить при возврате. Берём сохранённое при оплате; для старых платежей считаем по REF_PERCENT."""
+    if p["method"] == "balance": return
+    if p["ref_to"]:
+        info["ref"], info["bonus"] = p["ref_to"], p["ref_bonus"] or 0
+    else:
+        u = get_user(p["user_id"])
+        if u["ref"]:
+            info["ref"], info["bonus"] = u["ref"], p["amount"] * config.REF_PERCENT / 100
+
 def refund_plan(pid):
     """Что произойдёт при возврате платежа. (статус, платёж, детали). Статус ok, если вернуть можно."""
     p = get_payment(pid)
     if not p: return "not_found", None, {}
     if p["status"] != "paid": return "not_paid", p, {}
     now = int(time.time()); info = {}
+    if p["plan"] == "topup":
+        add = (p["amount"] or 0) + (p["bonus"] or 0)
+        if (get_user(p["user_id"])["topup"] or 0) < add - 1e-9:
+            return "topup_spent", p, {}
+        return "ok", p, {"topup": add}
     if p["gift"]:
         if p["code"] and con.execute("SELECT 1 FROM promo_uses WHERE code=?", (p["code"],)).fetchone():
             return "gift_used", p, {}
         info["gift_code"] = p["code"]
+        _refund_bonus(p, info)
     else:
         days = config.PLANS.get(p["plan"], (0, 0, ""))[1]
         u = get_user(p["user_id"])
         info["days"] = days
         info["new_until"] = max(now, u["sub_until"] - days * 86400) if u["sub_until"] > now else u["sub_until"]
-        if u["ref"] and p["method"] != "balance":
-            info["ref"], info["bonus"] = u["ref"], p["amount"] * config.REF_PERCENT / 100
+        _refund_bonus(p, info)
     return "ok", p, info
 
 def apply_refund(pid):
@@ -397,13 +494,16 @@ def apply_refund(pid):
     if st != "ok": return st, info
     cur = con.execute("UPDATE payments SET status='refunded', refunded_at=? WHERE id=? AND status='paid'", (int(time.time()), pid))
     if cur.rowcount == 0: return "not_paid", {}
+    if p["plan"] == "topup":
+        con.execute("UPDATE users SET topup=MAX(0,COALESCE(topup,0)-?) WHERE id=?", (info["topup"], p["user_id"])); con.commit()
+        return "ok", info
     if p["gift"]:
         if info.get("gift_code"): con.execute("DELETE FROM promo_codes WHERE code=?", (info["gift_code"],))
     else:
         con.execute("UPDATE users SET sub_until=? WHERE id=?", (info["new_until"], p["user_id"]))
-        if info.get("ref"):
-            con.execute("UPDATE users SET balance=MAX(0,balance-?), ref_earned=MAX(0,ref_earned-?) WHERE id=?",
-                        (info["bonus"], info["bonus"], info["ref"]))
+    if info.get("ref"):
+        con.execute("UPDATE users SET balance=MAX(0,balance-?), ref_earned=MAX(0,ref_earned-?) WHERE id=?",
+                    (info["bonus"], info["bonus"], info["ref"]))
     if p["method"] == "balance":
         con.execute("UPDATE users SET topup=COALESCE(topup,0)+? WHERE id=?", (p["amount"], p["user_id"]))
     con.commit()
@@ -430,7 +530,7 @@ def profit(since):
 
 def forecast(now, days=7):
     """Кто и на какую сумму может продлиться в ближайшие days дней (по прошлому тарифу каждого)."""
-    rows = con.execute("SELECT u.id, (SELECT plan FROM payments p WHERE p.user_id=u.id AND p.status='paid' AND COALESCE(p.gift,0)=0 "
+    rows = con.execute("SELECT u.id, (SELECT plan FROM payments p WHERE p.user_id=u.id AND p.status='paid' AND COALESCE(p.gift,0)=0 AND p.plan!='topup' "
                        "ORDER BY p.created DESC, p.id DESC LIMIT 1) AS plan FROM users u "
                        "WHERE COALESCE(u.banned,0)=0 AND u.sub_until>? AND u.sub_until<=?", (now, now + days * 86400)).fetchall()
     payers = [r for r in rows if r["plan"] in config.PLANS]
@@ -527,7 +627,7 @@ def expiring_users(days):
                        (now, now + days * 86400)).fetchall()
 
 def recent_payments(limit=15):
-    return con.execute("SELECT p.created, p.amount, p.method, p.plan, p.user_id AS id, u.username, u.name "
+    return con.execute("SELECT p.id AS pid, p.created, p.amount, p.method, p.plan, p.user_id AS id, u.username, u.name "
                        "FROM payments p LEFT JOIN users u ON u.id=p.user_id WHERE p.status='paid' "
                        "ORDER BY p.created DESC, p.id DESC LIMIT ?", (limit,)).fetchall()
 

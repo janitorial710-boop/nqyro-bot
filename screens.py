@@ -1,3 +1,4 @@
+import html
 from datetime import datetime
 from urllib.parse import quote
 from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup, CopyTextButton
@@ -94,7 +95,43 @@ def payment(u, plan, gift=False):
     price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка: {dlabel})" if price != base else "")
     return ("05_payment.png", f"<b>{'Оплата подарка' if gift else 'Оплата'}</b>\n\nТариф: {name}\n{price_line}{bal_line}\n\nВыбери способ оплаты.",
         kb(*rows, [("СБП", f"{g}pay:{plan}:sbp")], [("Банковская карта", f"{g}pay:{plan}:card")],
-           [("Другие способы", f"{g}pay:{plan}:any")], [("Назад", "go:gift" if gift else "go:plans")]))
+           [("Другие способы", f"{g}pay:{plan}:any")], *([] if gift else [[("Пополнить баланс", "go:topup")]]),
+           [("Назад", "go:gift" if gift else "go:plans")]))
+
+def topup(u):
+    bonus = config.TOPUP_BONUS_PERCENT
+    amounts = [a for a in (300, 500, 1000, 2000) if config.TOPUP_MIN <= a <= config.TOPUP_MAX]
+    rows = [[(f"{a} ₽", f"topup:{a}") for a in amounts[i:i + 2]] for i in range(0, len(amounts), 2)]
+    text = (f"<b>Пополнение баланса</b>\n\nСейчас на балансе: {db.total_balance(u):.0f} ₽\n"
+            + (f"Бонус к пополнению: +{bonus}%\n" if bonus else "")
+            + f"\nВыбери сумму или пришли свою (от {config.TOPUP_MIN} до {config.TOPUP_MAX} ₽). "
+              "Баланс можно потратить на подписку в любой момент.")
+    return ("07_profile.png", text, kb(*rows, [("Назад", "go:profile")]))
+
+def topup_pay(u, amount):
+    bonus = int(amount * config.TOPUP_BONUS_PERCENT / 100)
+    line = f"Сумма: {amount} ₽" + (f"\nБонус: +{bonus} ₽\nНа баланс придёт: {amount + bonus} ₽" if bonus else "")
+    return ("05_payment.png", f"<b>Пополнение баланса</b>\n\n{line}\n\nВыбери способ оплаты.",
+            kb([("СБП", f"tpay:{amount}:sbp")], [("Банковская карта", f"tpay:{amount}:card")],
+               [("Другие способы", f"tpay:{amount}:any")], [("Назад", "go:topup")]))
+
+def topup_ok(u):
+    return ("06_success.png", f"<b>Баланс пополнен</b>\n\nТеперь на балансе: {db.total_balance(u):.0f} ₽.\nМожно оплатить подписку в один клик.",
+            kb([("Тарифы", "go:plans")], [("Профиль", "go:profile")]))
+
+def partner(u):
+    srcs = db.partner_sources(u["id"])
+    if not srcs:
+        return ("08_friends.png", "<b>Партнёрка</b>\n\nУ тебя пока нет партнёрских ссылок. Хочешь зарабатывать на подписках, напиши в поддержку.",
+                kb([("Поддержка", "go:support")], [("Назад", "go:profile")]))
+    L = ["<b>Партнёрка</b>\n"]
+    for s in srcs:
+        st = db.src_stats(s["code"])
+        L.append(f"<b>{html.escape(s['title'])}</b> · {s['percent']:.0f}% с каждой оплаты\n"
+                 f"Регистраций: {st['regs']} · оплатили: {st['payers']} · начислено: {st['earned']:.0f} ₽\n"
+                 f"<code>https://t.me/{config.BOT_USERNAME}?start=src_{s['code']}</code>\n")
+    L.append(f"На балансе: {db.total_balance(u):.0f} ₽. Им можно оплатить подписку. Вывод на карту: через поддержку.")
+    return ("08_friends.png", "\n".join(L), kb([("Поддержка", "go:support")], [("Назад", "go:profile")]))
 
 def pay_dev(u, pid):
     return ("05_payment.png", "<b>Тестовый режим</b>\n\nПлатёжный сервис не подключён. Нажми кнопку, чтобы имитировать оплату.",
@@ -116,7 +153,8 @@ def profile(u):
             f"Баланс: {db.total_balance(u):.0f} ₽"
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
-        kb([("Продлить", "go:plans")], [("Подключиться", "go:connect"), ("Промокод", "promo")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
+        kb([("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")], [("Подключиться", "go:connect"), ("Промокод", "promo")],
+           *([[("🤝 Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []), [("Поддержка", "go:support"), ("Назад", "go:start")]))
 
 def friends(u):
     n, earned, bal = db.friends_stats(u["id"])
