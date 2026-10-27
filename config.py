@@ -16,6 +16,7 @@ OPEN_URL = os.getenv("OPEN_URL", "") or (f"{OPEN_BASE}/open/{{app}}?sub={{sub}}"
 HAPP_URL = os.getenv("HAPP_URL", "https://www.happ.su")
 INCY_URL = os.getenv("INCY_URL", "https://incy.cc")
 TRIAL_DAYS = 5
+FIRST_DISC_PERCENT = int(os.getenv("FIRST_DISC_PERCENT", "0"))   # скидка на первую покупку, % (0 = выключена)
 AUTO_MSGS = os.getenv("AUTO_MSGS", "1") == "1"                 # автосообщения и напоминания о брошенной оплате (0 = выключить)
 ABANDON_AFTER_MIN = int(os.getenv("ABANDON_AFTER_MIN", "60"))  # через сколько минут напомнить о неоплаченном счёте
 REF_PERCENT = 20

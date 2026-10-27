@@ -49,12 +49,21 @@ def connect(u, sub=None):
 
 def _rub(n): return f"{n:,}".replace(",", " ")
 
+def _renew(u):
+    """Строки кнопок «Продлить»: тем же тарифом, что в прошлый раз, если он известен."""
+    last = db.last_plan(u["id"])
+    if last in config.PLANS:
+        return [[(f"Продлить · {config.PLANS[last][2]} · {_rub(db.price_for(u, last))} ₽", f"buy:{last}")], [("Другой тариф", "go:plans")]]
+    return [[("Продлить", "go:plans")]]
+
 def plans(u):
-    dl = db.disc_label(u)
+    dl = db.price_info(u, "1")[2]
+    sale = db.active_sale()
     pr = {k: db.price_for(u, k) for k in config.PLANS}
     return ("04_plans.png",
         "<b>Выбери тариф</b>\n\n1 месяц: 249 ₽\n3 месяца: 599 ₽ (−20%)\n12 месяцев: 1 990 ₽ (−33%)\n\nДо 3 устройств на одну подписку."
-        + (f"\n\nТвоя скидка {dl} уже применена к цене в кнопках." if dl else ""),
+        + (f"\n\nАкция «{sale['title']}» до {d(sale['end'])}." if sale and sale["title"] else "")
+        + (f"\n\nТвоя скидка ({dl}) уже учтена в цене на кнопках." if dl else ""),
         kb([(f"1 месяц · {_rub(pr['1'])} ₽", "buy:1")], [(f"3 месяца · {_rub(pr['3'])} ₽", "buy:3")], [(f"12 месяцев · {_rub(pr['12'])} ₽", "buy:12")],
            [("Подарить подписку", "go:gift")], [("Назад", "go:start")]))
 
@@ -72,7 +81,7 @@ def gift_ready(u, code):
 
 def payment(u, plan, gift=False):
     name = config.PLANS[plan][2]
-    price = db.price_for(u, plan, gift)
+    price, _, dlabel = db.price_info(u, plan, gift)
     g = "g" if gift else ""
     bal = db.total_balance(u)
     rows = []
@@ -82,7 +91,7 @@ def payment(u, plan, gift=False):
         label = f"Оплатить балансом · {bal:.0f} ₽" if bal >= price else f"Баланс · {bal:.0f} ₽ (не хватает {price - bal:.0f} ₽)"
         rows.append([(label, f"{g}paybal:{plan}")])
     base = config.PLANS[plan][0]
-    price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка {db.disc_label(u)})" if price != base else "")
+    price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка: {dlabel})" if price != base else "")
     return ("05_payment.png", f"<b>{'Оплата подарка' if gift else 'Оплата'}</b>\n\nТариф: {name}\n{price_line}{bal_line}\n\nВыбери способ оплаты.",
         kb(*rows, [("СБП", f"{g}pay:{plan}:sbp")], [("Банковская карта", f"{g}pay:{plan}:card")],
            [("Другие способы", f"{g}pay:{plan}:any")], [("Назад", "go:gift" if gift else "go:plans")]))
@@ -120,7 +129,7 @@ def friends(u):
 
 def expiring(u):
     return ("09_expiring.png", "<b>Подписка заканчивается через 3 дня</b>\n\nПродли сейчас, и доступ не прервётся.",
-        kb([("Продлить", "go:plans")], [("Напомнить позже", "later")]))
+        kb(*_renew(u), [("Напомнить позже", "later")]))
 
 def support(u):
     return ("10_support.png", "<b>Поддержка</b>\n\nНапиши нам, если не получается подключиться или оплатить. Приложи скриншот, так будет быстрее.",
@@ -160,7 +169,7 @@ def auto_day3(u):
 
 def auto_miss(u):
     return ("09_expiring.png", "<b>Скучаем по тебе</b>\n\nПодписка закончилась неделю назад. Вернись, и всё заработает сразу, как раньше.",
-            kb([("Продлить", "go:plans")], [("Главное меню", "go:start")]))
+            kb(*_renew(u), [("Главное меню", "go:start")]))
 
 def promo_bad(u, reason):
     t = {"not_found": ("Код не найден", "Проверь, нет ли опечатки, и попробуй ещё раз."),

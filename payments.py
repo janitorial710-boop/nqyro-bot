@@ -39,6 +39,21 @@ async def create_invoice(uid: int, plan: str, method: str, email: str | None = N
     db.set_yk_id(pid, data["id"])
     return pid, data["confirmation"]["confirmation_url"]
 
+async def refund(yk_id: str, amount, email: str | None = None, name: str = "") -> None:
+    """Возврат платежа целиком через ЮKassa. Бросает исключение, если ЮKassa отказала."""
+    value = {"value": f"{int(amount)}.00", "currency": "RUB"}
+    body = {"payment_id": yk_id, "amount": value}
+    if config.RECEIPT_MODE == "email" and email:
+        body["receipt"] = {"customer": {"email": email}, "items": [{
+            "description": f"Подписка NQYRO, {name}", "quantity": "1.00", "amount": value,
+            "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
+    async with _session() as s:
+        async with s.post("https://api.yookassa.ru/v3/refunds", json=body, headers={"Idempotence-Key": str(uuid.uuid4())}) as r:
+            data = await r.json()
+            if r.status >= 300 or data.get("status") == "canceled":
+                logging.error("YooKassa refund error %s: %s", r.status, data)
+                raise RuntimeError(f"YooKassa refund {r.status}: {data.get('description') or data.get('status')}")
+
 async def status(yk_id: str) -> str:
     """pending | waiting_for_capture | succeeded | canceled"""
     async with _session() as s:

@@ -61,15 +61,66 @@ def create_promo(code, days, max_uses=0, expires=0, kind="days", value=0):
                 (code.upper(), days, max_uses, code.upper(), int(time.time()), expires, kind, value)); con.commit()
 
 # ---------- скидки ----------
-def price_for(u, plan, gift=False):
-    """Цена тарифа для пользователя с учётом его скидки. На подарки скидки не действуют. Минимум 1 ₽."""
+con.executescript("""
+CREATE TABLE IF NOT EXISTS sales(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, percent REAL, start INTEGER, end INTEGER, title TEXT);
+CREATE TABLE IF NOT EXISTS costs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, amount REAL, category TEXT, note TEXT);
+""")
+for _sql in ("ALTER TABLE payments ADD COLUMN code TEXT",            # код подарка, созданный этим платежом
+             "ALTER TABLE payments ADD COLUMN refunded_at INTEGER"):
+    try:
+        con.execute(_sql); con.commit()
+    except sqlite3.OperationalError:
+        pass
+
+def first_purchase(uid):
+    """True, если человек ещё ни разу не оплачивал подписку (подарки не считаются)."""
+    return con.execute("SELECT 1 FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 LIMIT 1", (uid,)).fetchone() is None
+
+def active_sale(now=None):
+    now = now or int(time.time())
+    return con.execute("SELECT * FROM sales WHERE start<=? AND end>=? ORDER BY percent DESC LIMIT 1", (now, now)).fetchone()
+
+def price_info(u, plan, gift=False):
+    """(цена, код_промокода_если_он_потрачен, подпись_скидки). Из всех скидок берётся самая выгодная:
+    личная по промокоду, общая акция, скидка на первую покупку. На подарки скидок нет. Минимум 1 ₽."""
     base = config.PLANS[plan][0]
-    kind = None if gift else u["disc_kind"]
-    val = u["disc_value"] or 0
-    if kind == "percent": p = base * (1 - val / 100)
-    elif kind == "rub": p = base - val
-    else: p = base
-    return max(1, int(round(p)))
+    if gift:
+        return base, None, ""
+    cands = []
+    if u["disc_kind"]:
+        val = u["disc_value"] or 0
+        p = base * (1 - val / 100) if u["disc_kind"] == "percent" else base - val
+        cands.append((p, u["disc_code"], disc_label(u)))
+    sale = active_sale()
+    if sale:
+        cands.append((base * (1 - sale["percent"] / 100), None, f"акция −{sale['percent']:.0f}%"))
+    if config.FIRST_DISC_PERCENT and first_purchase(u["id"]):
+        cands.append((base * (1 - config.FIRST_DISC_PERCENT / 100), None, f"на первую покупку −{config.FIRST_DISC_PERCENT}%"))
+    if not cands:
+        return base, None, ""
+    p, code, label = min(cands, key=lambda c: c[0])
+    if p >= base:
+        return base, None, ""
+    return max(1, int(round(p))), code, label
+
+def price_for(u, plan, gift=False):
+    return price_info(u, plan, gift)[0]
+
+def last_plan(uid):
+    """Тариф последней оплаты (не подарок) или None."""
+    r = con.execute("SELECT plan FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 ORDER BY created DESC, id DESC LIMIT 1", (uid,)).fetchone()
+    return r["plan"] if r else None
+
+def create_sale(percent, start, end, title):
+    cur = con.execute("INSERT INTO sales(percent,start,end,title) VALUES(?,?,?,?)", (percent, start, end, title)); con.commit(); return cur.lastrowid
+
+def list_sales():
+    return con.execute("SELECT * FROM sales ORDER BY start DESC").fetchall()
+
+def delete_sale(sid):
+    cur = con.execute("DELETE FROM sales WHERE id=?", (sid,)); con.commit(); return cur.rowcount
 
 def disc_label(u):
     """'−20%' или '−100 ₽'; пустая строка, если скидки нет."""
@@ -154,8 +205,7 @@ def claim_trial(uid):
 
 def create_payment(uid, plan, method, gift=False):
     u = get_user(uid)
-    price = price_for(u, plan, gift)
-    disc = u["disc_code"] if (not gift and u["disc_kind"]) else None
+    price, disc, _ = price_info(u, plan, gift)
     cur = con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift,disc) VALUES(?,?,?,?,?,?,?,?)",
                       (uid, plan, price, method, "pending", int(time.time()), 1 if gift else 0, disc))
     con.commit(); return cur.lastrowid
@@ -170,6 +220,7 @@ def complete_payment(pid):
     code = None
     if p["gift"]:
         code, until = make_gift_code(p["plan"]), None
+        con.execute("UPDATE payments SET code=? WHERE id=?", (code, pid)); con.commit()
     else:
         until = extend(p["user_id"], config.PLANS[p["plan"]][1])
         if p["disc"]: _clear_disc(p["user_id"], p["disc"]); con.commit()
@@ -205,8 +256,7 @@ def pay_with_balance(uid, plan, gift=False):
     Возвращает ("sub", дата_окончания) или ("gift", код); None, если денег не хватает."""
     days = config.PLANS[plan][1]
     u = get_user(uid)
-    price = price_for(u, plan, gift)
-    disc = u["disc_code"] if (not gift and u["disc_kind"]) else None
+    price, disc, _ = price_info(u, plan, gift)
     if total_balance(u) < price:
         return None
     from_ref = min(u["balance"] or 0, price)
@@ -215,10 +265,12 @@ def pay_with_balance(uid, plan, gift=False):
                       (from_ref, from_main, uid, from_ref, from_main - 1e-9))
     if cur.rowcount == 0:
         con.rollback(); return None
-    con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift,disc) VALUES(?,?,?,?,?,?,?,?)",
-                (uid, plan, price, "balance", "paid", int(time.time()), 1 if gift else 0, disc))
+    ins = con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift,disc) VALUES(?,?,?,?,?,?,?,?)",
+                      (uid, plan, price, "balance", "paid", int(time.time()), 1 if gift else 0, disc))
     if gift:
-        con.commit(); return ("gift", make_gift_code(plan))
+        code = make_gift_code(plan)
+        con.execute("UPDATE payments SET code=? WHERE id=?", (code, ins.lastrowid)); con.commit()
+        return ("gift", code)
     if disc: _clear_disc(uid, disc)
     con.commit()
     return ("sub", extend(uid, days))
@@ -317,6 +369,73 @@ def report_data(now):
         "exp_3d": q("SELECT COUNT(*) FROM users WHERE sub_until>? AND sub_until<=?", now, now + 3 * 86400),
         "abandoned": len(abandoned_list(now)),
     }
+
+# ---------- возвраты, расходы, прибыль, прогноз ----------
+def refund_plan(pid):
+    """Что произойдёт при возврате платежа. (статус, платёж, детали). Статус ok, если вернуть можно."""
+    p = get_payment(pid)
+    if not p: return "not_found", None, {}
+    if p["status"] != "paid": return "not_paid", p, {}
+    now = int(time.time()); info = {}
+    if p["gift"]:
+        if p["code"] and con.execute("SELECT 1 FROM promo_uses WHERE code=?", (p["code"],)).fetchone():
+            return "gift_used", p, {}
+        info["gift_code"] = p["code"]
+    else:
+        days = config.PLANS.get(p["plan"], (0, 0, ""))[1]
+        u = get_user(p["user_id"])
+        info["days"] = days
+        info["new_until"] = max(now, u["sub_until"] - days * 86400) if u["sub_until"] > now else u["sub_until"]
+        if u["ref"] and p["method"] != "balance":
+            info["ref"], info["bonus"] = u["ref"], p["amount"] * config.REF_PERCENT / 100
+    return "ok", p, info
+
+def apply_refund(pid):
+    """Помечает платёж возвращённым и откатывает последствия: дни подписки, реферальный бонус, подарочный код.
+    Платёж с баланса возвращается на основной баланс. (статус, детали)."""
+    st, p, info = refund_plan(pid)
+    if st != "ok": return st, info
+    cur = con.execute("UPDATE payments SET status='refunded', refunded_at=? WHERE id=? AND status='paid'", (int(time.time()), pid))
+    if cur.rowcount == 0: return "not_paid", {}
+    if p["gift"]:
+        if info.get("gift_code"): con.execute("DELETE FROM promo_codes WHERE code=?", (info["gift_code"],))
+    else:
+        con.execute("UPDATE users SET sub_until=? WHERE id=?", (info["new_until"], p["user_id"]))
+        if info.get("ref"):
+            con.execute("UPDATE users SET balance=MAX(0,balance-?), ref_earned=MAX(0,ref_earned-?) WHERE id=?",
+                        (info["bonus"], info["bonus"], info["ref"]))
+    if p["method"] == "balance":
+        con.execute("UPDATE users SET topup=COALESCE(topup,0)+? WHERE id=?", (p["amount"], p["user_id"]))
+    con.commit()
+    return "ok", info
+
+def add_cost(amount, category, note=""):
+    cur = con.execute("INSERT INTO costs(ts,amount,category,note) VALUES(?,?,?,?)", (int(time.time()), amount, category, note)); con.commit()
+    return cur.lastrowid
+
+def recent_costs(limit=15):
+    return con.execute("SELECT * FROM costs ORDER BY ts DESC, id DESC LIMIT ?", (limit,)).fetchall()
+
+def delete_cost(cid):
+    cur = con.execute("DELETE FROM costs WHERE id=?", (cid,)); con.commit(); return cur.rowcount
+
+def profit(since):
+    """Выручка деньгами (без оплат с баланса), расходы по категориям и возвраты за период."""
+    q = lambda sql, *a: con.execute(sql, a).fetchone()
+    rev = q("SELECT COALESCE(SUM(amount),0), COUNT(*) FROM payments WHERE status='paid' AND method!='balance' AND created>=?", since)
+    ref = q("SELECT COALESCE(SUM(amount),0), COUNT(*) FROM payments WHERE status='refunded' AND method!='balance' AND refunded_at>=?", since)
+    cats = con.execute("SELECT category, SUM(amount) s FROM costs WHERE ts>=? GROUP BY category ORDER BY s DESC", (since,)).fetchall()
+    return {"revenue": rev[0], "pay_n": rev[1], "refunds": ref[0], "refund_n": ref[1],
+            "costs": sum(c["s"] for c in cats), "cats": [(c["category"], c["s"]) for c in cats]}
+
+def forecast(now, days=7):
+    """Кто и на какую сумму может продлиться в ближайшие days дней (по прошлому тарифу каждого)."""
+    rows = con.execute("SELECT u.id, (SELECT plan FROM payments p WHERE p.user_id=u.id AND p.status='paid' AND COALESCE(p.gift,0)=0 "
+                       "ORDER BY p.created DESC, p.id DESC LIMIT 1) AS plan FROM users u "
+                       "WHERE COALESCE(u.banned,0)=0 AND u.sub_until>? AND u.sub_until<=?", (now, now + days * 86400)).fetchall()
+    payers = [r for r in rows if r["plan"] in config.PLANS]
+    last = con.execute("SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='paid' AND method!='balance' AND created>?", (now - days * 86400,)).fetchone()[0]
+    return {"total": len(rows), "payers": len(payers), "potential": sum(config.PLANS[r["plan"]][0] for r in payers), "last": last}
 
 def mark_reminded(uid, until):
     con.execute("UPDATE users SET reminded_for=? WHERE id=?", (until, uid)); con.commit()

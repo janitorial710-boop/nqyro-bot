@@ -461,6 +461,136 @@ async def cmd_auto(m: Message):
     text += "\n".join(f"{names.get(r['k'], r['k'])}: отправлено {r['c']}" for r in rows) if rows else "Пока ничего не отправлено."
     await m.answer(text)
 
+def start_of_day(s):
+    e = end_of_day(s)
+    return e - 86399 if e else None
+
+@dp.message(Command("sale"), is_admin)
+async def cmd_sale(m: Message, command: CommandObject):
+    usage = ("Формат: /sale ПРОЦЕНТ ДАТА_С ДАТА_ПО [НАЗВАНИЕ]\n"
+             "Пример: /sale 20% 01.11.2026 07.11.2026 Чёрная пятница\n"
+             "Скидка действует на все тарифы с начала первого дня до конца последнего (по TZ_HOURS). Подарки не затрагивает. "
+             "С личной скидкой по промокоду берётся самая выгодная, они не складываются.")
+    try:
+        a = command.args.split(); pct = float(a[0].rstrip("%").replace(",", "."))
+        assert 1 <= pct <= 90 and DATE_RE.match(a[1]) and DATE_RE.match(a[2])
+        st, en = start_of_day(a[1]), end_of_day(a[2]); assert st and en and en > st and en > time.time()
+        title = " ".join(a[3:])[:60]
+    except Exception:
+        return await m.answer(usage)
+    sid = db.create_sale(pct, st, en, title)
+    alog(m, "sale", sid, f"−{pct:.0f}% {a[1]}–{a[2]} {title}")
+    await m.answer(f"Акция #{sid}: −{pct:.0f}% с {dfmt(st)} по {dfmt(en)}" + (f" «{title}»" if title else "") + ".")
+
+@dp.message(Command("sales"), is_admin)
+async def cmd_sales(m: Message):
+    rows = db.list_sales()
+    if not rows:
+        return await m.answer("Акций нет. Создать: /sale 20% 01.11.2026 07.11.2026 Название")
+    now = time.time(); lines = []
+    for r in rows:
+        state = "идёт" if r["start"] <= now <= r["end"] else ("будет" if r["start"] > now else "закончилась")
+        lines.append(f"#{r['id']} · −{r['percent']:.0f}% · {dfmt(r['start'])}–{dfmt(r['end'])} · {state}" + (f" · {html.escape(r['title'])}" if r["title"] else ""))
+    await send_lines(m, "<b>Акции</b>", lines, "\nУдалить: /delsale НОМЕР")
+
+@dp.message(Command("delsale"), is_admin)
+async def cmd_delsale(m: Message, command: CommandObject):
+    try: sid = int((command.args or "").strip())
+    except ValueError: return await m.answer("Формат: /delsale НОМЕР (номера в /sales)")
+    if db.delete_sale(sid):
+        alog(m, "delsale", sid); await m.answer("Акция удалена.")
+    else:
+        await m.answer("Такой акции нет.")
+
+@dp.message(Command("cost"), can_stats)
+async def cmd_cost(m: Message, command: CommandObject):
+    usage = "Формат: /cost СУММА КАТЕГОРИЯ [заметка]\nПримеры:\n/cost 3500 серверы\n/cost 12000 реклама Twitch, октябрь"
+    try:
+        a = command.args.split(); amount = float(a[0].replace(",", ".")); cat = a[1].lower()[:30]; assert 0 < amount < 10_000_000
+        note = " ".join(a[2:])[:100]
+    except Exception:
+        return await m.answer(usage)
+    cid = db.add_cost(amount, cat, note)
+    alog(m, "cost", cid, f"{amount:.0f} ₽ {cat} {note}")
+    await m.answer(f"Записано #{cid}: {amount:.0f} ₽ · {cat}" + (f" · {html.escape(note)}" if note else "") + "\nПрибыль: /profit")
+
+@dp.message(Command("costs"), can_stats)
+async def cmd_costs(m: Message):
+    rows = db.recent_costs(15)
+    if not rows:
+        return await m.answer("Расходов пока нет. Записать: /cost 3500 серверы")
+    lines = [f"#{r['id']} · {tfmt(r['ts'], '%d.%m')} · {r['amount']:.0f} ₽ · {html.escape(r['category'])}" + (f" · {html.escape(r['note'])}" if r["note"] else "") for r in rows]
+    await send_lines(m, "<b>Последние расходы</b>", lines, "\nУдалить ошибочную: /delcost НОМЕР (только владелец)")
+
+@dp.message(Command("delcost"), is_admin)
+async def cmd_delcost(m: Message, command: CommandObject):
+    try: cid = int((command.args or "").strip())
+    except ValueError: return await m.answer("Формат: /delcost НОМЕР (номера в /costs)")
+    if db.delete_cost(cid):
+        alog(m, "delcost", cid); await m.answer("Расход удалён.")
+    else:
+        await m.answer("Такого расхода нет.")
+
+@dp.message(Command("profit"), can_stats)
+async def cmd_profit(m: Message, command: CommandObject):
+    try: days = min(365, max(1, int((command.args or "30").strip())))
+    except ValueError: days = 30
+    r = db.profit(int(time.time()) - days * 86400)
+    cats = "".join(f"\n   {html.escape(c)}: {s:.0f} ₽" for c, s in r["cats"])
+    await m.answer(f"<b>Прибыль за {days} дн.</b>\n\nВыручка деньгами: {r['revenue']:.0f} ₽ (оплат: {r['pay_n']})\n"
+                   f"Расходы: {r['costs']:.0f} ₽{cats}\n<b>Чистая прибыль: {r['revenue'] - r['costs']:.0f} ₽</b>"
+                   + (f"\n\nВозвраты за период: {r['refunds']:.0f} ₽ ({r['refund_n']} шт.), в выручку уже не входят" if r["refund_n"] else "")
+                   + "\n\nОплаты с баланса в выручку не входят: деньги за них пришли раньше.")
+
+@dp.message(Command("forecast"), can_stats)
+async def cmd_forecast(m: Message):
+    f = db.forecast(int(time.time()), 7)
+    p = f["potential"]
+    await m.answer(f"<b>Прогноз на 7 дней</b>\n\nПодписка закончится у {f['total']} чел., из них платили раньше {f['payers']}.\n"
+                   f"Если продлят все платившие (тем же тарифом): {p:.0f} ₽\n"
+                   f"Если продлят 50%: {p * 0.5:.0f} ₽ · 80%: {p * 0.8:.0f} ₽\n\n"
+                   f"Для сравнения: за последние 7 дней оплат деньгами на {f['last']:.0f} ₽.\n"
+                   "Это оценка по прошлым тарифам, без учёта скидок и новых покупателей.")
+
+@dp.message(Command("refund"), is_admin)
+async def cmd_refund(m: Message, command: CommandObject):
+    a = (command.args or "").split()
+    try: pid = int(a[0])
+    except Exception:
+        return await m.answer("Формат: /refund НОМЕР_ПЛАТЕЖА\nНомер платежа смотри в /payments и в /user. Сначала покажу, что изменится, потом попрошу подтвердить.")
+    st, p, info = db.refund_plan(pid)
+    bad = {"not_found": "Платёж не найден.", "not_paid": "Этот платёж не в статусе «оплачен» (может быть, уже возвращён).",
+           "gift_used": "Подарок уже активирован другом, вернуть его нельзя."}
+    if st != "ok":
+        return await m.answer(bad[st])
+    u = db.peek_user(p["user_id"])
+    plan = config.PLANS.get(p["plan"], (0, 0, p["plan"]))[2]
+    how = "с баланса" if p["method"] == "balance" else p["method"]
+    effects = []
+    effects.append("деньги вернутся на основной баланс человека" if p["method"] == "balance" else
+                   ("тестовый платёж: деньги не возвращаются" if (config.DEV_PAY or not p["yk_id"]) else "деньги вернутся через ЮKassa на тот же способ оплаты"))
+    if p["gift"]:
+        effects.append("подарочный код будет удалён" + (f" ({info['gift_code']})" if info.get("gift_code") else ""))
+    else:
+        effects.append(f"у человека уберётся {info['days']} дн. подписки (до {dfmt(info['new_until']) if info['new_until'] else '-'})")
+        if info.get("ref"): effects.append(f"у пригласившего ({info['ref']}) спишется бонус {info['bonus']:.0f} ₽")
+    head = f"Платёж #{pid}: {p['amount']} ₽ · {plan} · {how}" + (f"\n{who(u)}" if u else "")
+    if "да" not in [x.lower() for x in a[1:]]:
+        return await m.answer(head + "\n\nЧто произойдёт:\n- " + "\n- ".join(effects) + f"\n\nПодтвердить: /refund {pid} да", disable_web_page_preview=True)
+    if p["method"] != "balance" and p["yk_id"] and not config.DEV_PAY:
+        try:
+            await payments.refund(p["yk_id"], p["amount"], u["email"] if u else None, plan)
+        except Exception as e:
+            logging.exception("refund failed")
+            return await m.answer(f"ЮKassa не приняла возврат, в боте ничего не изменено.\n{html.escape(str(e))}")
+    st, info = db.apply_refund(pid)
+    if st != "ok":
+        return await m.answer("Платёж уже изменился, пока шёл возврат. Если деньги в ЮKassa вернулись, проверь платёж вручную: /user " + str(p["user_id"]))
+    if not p["gift"]:
+        await panel.set_expiry(p["user_id"], info["new_until"])
+    alog(m, "refund", pid, f"{p['amount']} ₽, человек {p['user_id']}")
+    await m.answer("Готово. Возврат выполнен.\n- " + "\n- ".join(effects), disable_web_page_preview=True)
+
 @dp.message(Command("delpromo"), is_admin)
 async def cmd_delpromo(m: Message, command: CommandObject):
     ok = command.args and db.delete_promo(command.args.strip())
@@ -741,7 +871,11 @@ ADMIN_HELP = (
     "/newpromo КОД ДНИ [АКТИВАЦИЙ] [ДД.ММ.ГГГГ]\n/newdisc КОД 20% (или 100 ₽) [АКТИВАЦИЙ] [ДД.ММ.ГГГГ]: скидка\n/genpromo ДНИ КОЛ-ВО [ПРЕФИКС] [ДД.ММ.ГГГГ]\n"
     "/promos: список\n/delpromo КОД\n/delallpromo [used] да: удалить все или только использованные\n\n"
     "<b>Продажи</b>\n"
-    "/abandoned: кто начал оплату и не оплатил\n/auto: сколько автосообщений отправлено\n\n"
+    "/abandoned: кто начал оплату и не оплатил\n/auto: сколько автосообщений отправлено\n"
+    "/sale 20% ДД.ММ.ГГГГ ДД.ММ.ГГГГ [название]: акция на все тарифы\n/sales: список акций\n/delsale НОМЕР\n\n"
+    "<b>Деньги</b>\n"
+    "/profit [дни]: выручка, расходы, прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/delcost НОМЕР\n"
+    "/forecast: сколько может прийти на продлениях за неделю\n/refund НОМЕР_ПЛАТЕЖА: вернуть платёж\n\n"
     "<b>Рассылка</b>\n"
     "/broadcast [all|active|expired|never] ТЕКСТ: предпросмотр\n/broadcastok: отправить\n/broadcastcancel: отменить\n\n"
     "<b>Контроль</b>\n"
@@ -751,7 +885,8 @@ ADMIN_HELP = (
 SUPPORT_HELP = ("<b>Тебе доступна поддержка</b>\n\n/find ЗАПРОС: поиск по имени, @нику или ID\n/user ID: карточка человека\n"
                 "/users [стр]: список\n/expiring [дни]: у кого скоро конец подписки\n"
                 f"/give ID ДНИ [тихо]: выдать дни (до {config.SUPPORT_GIVE_MAX} за раз)")
-ACCOUNTANT_HELP = "<b>Тебе доступна бухгалтерия</b>\n\n/stats: сводка\n/payments [N]: последние оплаты\n/abandoned: брошенные оплаты\n/report: отчёт за сутки"
+ACCOUNTANT_HELP = ("<b>Тебе доступна бухгалтерия</b>\n\n/stats: сводка\n/payments [N]: последние оплаты\n/abandoned: брошенные оплаты\n/report: отчёт за сутки\n"
+                   "/profit [дни]: прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/forecast: прогноз продлений")
 
 def _ago(ts): return tfmt(ts, "%d.%m %H:%M")
 
