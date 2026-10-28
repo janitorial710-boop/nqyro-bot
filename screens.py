@@ -23,7 +23,7 @@ def start(u):
            [("Подключиться", "go:connect"), ("Тарифы", "go:plans")],
            [("Профиль", "go:profile"), ("Друзья", "go:friends")],
            [("Промокод", "promo"), ("Поддержка", "go:support")],
-           [("💸 Вывести деньги", "wd:start")]))
+           [("Вывести деньги", "wd:start")]))
 
 def trial(u, ok=True):
     if not ok:
@@ -73,7 +73,8 @@ def plans(u):
 def gift_plans(u):
     return ("04_plans.png",
         "<b>Подарить подписку</b>\n\nВыбери срок. После оплаты получишь код и ссылку: отправь их другу, и подписка добавится ему сама. Код одноразовый.",
-        kb([("1 месяц · 249 ₽", "gbuy:1")], [("3 месяца · 599 ₽", "gbuy:3")], [("12 месяцев · 1 990 ₽", "gbuy:12")], [("Назад", "go:plans")]))
+        kb([("1 месяц · 249 ₽", "gbuy:1")], [("3 месяца · 599 ₽", "gbuy:3")], [("12 месяцев · 1 990 ₽", "gbuy:12")],
+           [("🎁 Подарить по @нику", "gn:start")], [("Назад", "go:plans")]))
 
 def gift_ready(u, code):
     link = f"https://t.me/{config.BOT_USERNAME}?start=gift_{code}"
@@ -97,8 +98,18 @@ def payment(u, plan, gift=False):
     price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка: {dlabel})" if price != base else "")
     return ("05_payment.png", f"<b>{'Оплата подарка' if gift else 'Оплата'}</b>\n\nТариф: {name}\n{price_line}{bal_line}\n\nВыбери способ оплаты.",
         kb(*rows, [("СБП", f"{g}pay:{plan}:sbp")], [("Банковская карта", f"{g}pay:{plan}:card")],
-           [("Другие способы", f"{g}pay:{plan}:any")], *([] if gift else [[("Пополнить баланс", "go:topup")]]),
+           [("Другие способы", f"{g}pay:{plan}:any")], *_alt_rows(f"{g}pay:{plan}"),
+           *([] if gift or not config.AUTORENEW else [[(("✅ " if u["autorenew"] else "☐ ") + "Автопродление картой", f"ar:t:{plan}")]]),
+           *([] if gift else [[("Пополнить баланс", "go:topup")]]),
            [("Назад", "go:gift" if gift else "go:plans")]))
+
+def _alt_rows(prefix):
+    """Кнопки Stars и CryptoBot отключены по решению владельца. Вернуть: убрать return [] ниже."""
+    return []
+    row = []
+    if config.STARS_RUB_PER_STAR > 0: row.append(("⭐ Telegram Stars", f"{prefix}:stars"))
+    if config.CRYPTO_TOKEN: row.append(("₿ Крипта", f"{prefix}:crypto"))
+    return [row] if row else []
 
 def topup(u):
     bonus = config.TOPUP_BONUS_PERCENT
@@ -115,7 +126,7 @@ def topup_pay(u, amount):
     line = f"Сумма: {amount} ₽" + (f"\nБонус: +{bonus} ₽\nНа баланс придёт: {amount + bonus} ₽" if bonus else "")
     return ("05_payment.png", f"<b>Пополнение баланса</b>\n\n{line}\n\nВыбери способ оплаты.",
             kb([("СБП", f"tpay:{amount}:sbp")], [("Банковская карта", f"tpay:{amount}:card")],
-               [("Другие способы", f"tpay:{amount}:any")], [("Назад", "go:topup")]))
+               [("Другие способы", f"tpay:{amount}:any")], *_alt_rows(f"tpay:{amount}"), [("Назад", "go:topup")]))
 
 def topup_ok(u):
     return ("06_success.png", f"<b>Баланс пополнен</b>\n\nТеперь на балансе: {db.total_balance(u):.0f} ₽.\nМожно оплатить подписку в один клик.",
@@ -156,6 +167,7 @@ def profile(u):
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
         kb([("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")], [("Подключиться", "go:connect"), ("Промокод", "promo")],
+           *([[("🔁 Автопродление", "ar:open")]] if config.AUTORENEW else []),
            *([[("🤝 Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []), [("Поддержка", "go:support"), ("Назад", "go:start")]))
 
 def friends(u):

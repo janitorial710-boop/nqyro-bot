@@ -75,6 +75,15 @@ for _sql in ("ALTER TABLE payments ADD COLUMN code TEXT",            # код п
     except sqlite3.OperationalError:
         pass
 
+for _sql in ("ALTER TABLE users ADD COLUMN disc_until INTEGER DEFAULT 0",    # до какого момента действует скидка (0 = без срока)
+             "ALTER TABLE users ADD COLUMN autorenew INTEGER DEFAULT 0",     # 1 = человек включил автопродление
+             "ALTER TABLE users ADD COLUMN pm_id TEXT",                      # сохранённый способ оплаты в ЮKassa
+             "ALTER TABLE users ADD COLUMN pm_title TEXT"):                  # подпись для человека: «•••• 1234»
+    try:
+        con.execute(_sql); con.commit()
+    except sqlite3.OperationalError:
+        pass
+
 def first_purchase(uid):
     """True, если человек ещё ни разу не оплачивал подписку (подарки не считаются)."""
     return con.execute("SELECT 1 FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan!='topup' LIMIT 1", (uid,)).fetchone() is None
@@ -90,7 +99,7 @@ def price_info(u, plan, gift=False):
     if gift:
         return base, None, ""
     cands = []
-    if u["disc_kind"]:
+    if u["disc_kind"] and not (u["disc_until"] and u["disc_until"] < time.time()):   # просроченная скидка не действует
         val = u["disc_value"] or 0
         p = base * (1 - val / 100) if u["disc_kind"] == "percent" else base - val
         cands.append((p, u["disc_code"], disc_label(u)))
@@ -646,6 +655,8 @@ def promo_use_count(uid):
 def segment_ids(seg):
     """ID для рассылки: all | active | expired | never. Заблокированные не входят."""
     now = int(time.time())
-    cond = {"all": "1=1", "active": "sub_until>?", "expired": "sub_until>0 AND sub_until<=?", "never": "sub_until=0"}[seg]
-    params = (now,) if "?" in cond else ()
+    paid = "EXISTS (SELECT 1 FROM payments p WHERE p.user_id=users.id AND p.status='paid' AND p.method!='balance' AND p.plan!='topup')"
+    cond = {"all": "1=1", "active": "sub_until>?", "expired": "sub_until>0 AND sub_until<=?", "never": "sub_until=0",
+            "new7": "created>?", "new30": "created>?", "paid": paid, "trialonly": f"trial_used=1 AND NOT {paid}"}[seg]
+    params = {"new7": (now - 7 * 86400,), "new30": (now - 30 * 86400,)}.get(seg, (now,) if "?" in cond else ())
     return [r["id"] for r in con.execute(f"SELECT id FROM users WHERE COALESCE(banned,0)=0 AND {cond}", params).fetchall()]

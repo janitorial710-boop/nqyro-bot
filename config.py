@@ -71,3 +71,20 @@ PAYOUT_HOLD_DAYS = int(os.getenv("PAYOUT_HOLD_DAYS", "14"))           # скол
 PAYOUT_COOLDOWN_DAYS = int(os.getenv("PAYOUT_COOLDOWN_DAYS", "7"))    # не чаще одного вывода за N дней
 SURVEY_AFTER_DAYS = int(os.getenv("SURVEY_AFTER_DAYS", "2"))          # через сколько дней после конца подписки спросить «почему не продлил»
 DEVICE_RESET_COOLDOWN_MIN = int(os.getenv("DEVICE_RESET_COOLDOWN_MIN", "10"))   # как часто человек может сбрасывать устройства сам
+
+
+# --- Автопродление (ЮKassa: сохранённая карта). В кабинете ЮKassa должны быть подключены «Автоплатежи» (рекуррентные платежи) ---
+AUTORENEW = os.getenv("AUTORENEW", "0") == "1"                       # 1 = показывать людям «Автопродление»
+AUTORENEW_NOTICE_DAYS = int(os.getenv("AUTORENEW_NOTICE_DAYS", "2"))  # за сколько дней предупреждать о списании
+
+# --- Другие способы оплаты ---
+STARS_RUB_PER_STAR = float(os.getenv("STARS_RUB_PER_STAR", "0"))    # сколько ₽ стоит одна звезда; 0 = оплата Stars выключена
+CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "")                         # токен Crypto Pay (@CryptoBot → Crypto Pay → Создать приложение); пусто = выключено
+CRYPTO_ASSETS = os.getenv("CRYPTO_ASSETS", "USDT,TON")               # какими монетами можно платить
+CRYPTO_API = os.getenv("CRYPTO_API", "https://pay.crypt.bot/api")    # для тестовой сети: https://testnet-pay.crypt.bot/api
+
+# --- Возврат ушедших (скидка тем, у кого подписка закончилась давно) ---
+WINBACK_PERCENT = int(os.getenv("WINBACK_PERCENT", "20"))            # размер скидки, %; 0 = выключено
+WINBACK_AFTER_DAYS = int(os.getenv("WINBACK_AFTER_DAYS", "14"))      # через сколько дней после конца подписки писать
+WINBACK_WINDOW_DAYS = int(os.getenv("WINBACK_WINDOW_DAYS", "7"))     # кому писать: ушли не раньше, чем AFTER+WINDOW дней назад (старых не трогаем)
+WINBACK_HOURS = int(os.getenv("WINBACK_HOURS", "72"))                # сколько часов действует скидка

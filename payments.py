@@ -27,6 +27,8 @@ async def create_invoice(uid: int, plan: str, method: str, email: str | None = N
         body["payment_method_data"] = {"type": "sbp"}
     elif method == "card":
         body["payment_method_data"] = {"type": "bank_card"}
+    if config.AUTORENEW and not gift and not topup and method != "sbp" and db.get_user(uid)["autorenew"]:
+        body["save_payment_method"] = True   # карта сохранится для автопродления (СБП не сохраняется)
     if config.RECEIPT_MODE == "email" and email:
         body["receipt"] = {"customer": {"email": email}, "items": [{
             "description": "Пополнение баланса NQYRO" if topup else f"{'Подарочная подписка' if gift else 'Подписка'} NQYRO, {name}", "quantity": "1.00", "amount": amount,
@@ -64,3 +66,34 @@ async def status(yk_id: str) -> str:
                 logging.error("YooKassa status error %s: %s", r.status, data)
                 raise RuntimeError(f"YooKassa {r.status}")
             return data["status"]
+
+
+async def get(yk_id: str) -> dict:
+    """Платёж целиком (нужен, чтобы забрать сохранённый способ оплаты)."""
+    async with _session() as s:
+        async with s.get(f"{API}/{yk_id}") as r:
+            data = await r.json()
+            if r.status >= 300:
+                raise RuntimeError(f"YooKassa {r.status}")
+            return data
+
+async def charge_saved(pid: int, uid: int, pm_id: str, email: str | None = None) -> str:
+    """Автосписание с сохранённой карты. Возвращает статус ЮKassa (succeeded / pending / canceled)."""
+    p = db.get_payment(pid)
+    name = config.plan_name(p["plan"])
+    amount = {"value": f"{p['amount']}.00", "currency": "RUB"}
+    body = {"amount": amount, "capture": True, "payment_method_id": pm_id,
+            "description": f"NQYRO: автопродление, {name}",
+            "metadata": {"payment_id": str(pid), "user_id": str(uid), "autorenew": "1"}}
+    if config.RECEIPT_MODE == "email" and email:
+        body["receipt"] = {"customer": {"email": email}, "items": [{
+            "description": f"Подписка NQYRO, {name}", "quantity": "1.00", "amount": amount,
+            "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
+    async with _session() as s:
+        async with s.post(API, json=body, headers={"Idempotence-Key": f"renew-{pid}"}) as r:
+            data = await r.json()
+            if r.status >= 300:
+                logging.error("YooKassa autorenew error %s: %s", r.status, data)
+                raise RuntimeError(f"YooKassa {r.status}")
+    db.set_yk_id(pid, data["id"])
+    return data["status"]

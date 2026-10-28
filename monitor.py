@@ -4,7 +4,10 @@
 чтобы не будить из-за одиночного сбоя сети. Если PANEL_URL не задан, мониторинг не запускается.
 """
 import logging, asyncio
+import time
 import config, panel
+
+STATE = {"ok": None, "total": 0, "up": 0, "ts": 0}   # последнее известное состояние: его читает профиль и /status
 
 async def run(notify):
     if not config.PANEL_URL:
@@ -19,11 +22,14 @@ async def run(notify):
                 nodes, err = None, e
             if nodes is None:
                 fails += 1
+                if fails >= 2: STATE.update(ok=False, ts=time.time())
                 if fails >= 2 and not panel_down:
                     panel_down = True
                     await notify(f"🔴 Панель Remnawave не отвечает.\nОшибка: {err}\nПроверь сервер панели и PANEL_TOKEN.")
             else:
                 fails = 0
+                live = [n for n in nodes if not n.get("isDisabled")]
+                STATE.update(ok=True, total=len(live), up=sum(1 for n in live if n.get("isConnected")), ts=time.time())
                 if panel_down:
                     panel_down = False
                     await notify("🟢 Панель Remnawave снова отвечает.")

@@ -177,8 +177,14 @@ def wd_info(uid):
     pending = con.execute("SELECT * FROM payouts WHERE user_id=? AND status='pending'", (uid,)).fetchone()
     last = q("SELECT MAX(created) FROM payouts WHERE user_id=? AND status IN ('pending','paid')", uid)
     cool_until = last + config.PAYOUT_COOLDOWN_DAYS * 86400 if last else 0
+    blocked = bool(con.execute("SELECT 1 FROM kv WHERE k=?", (f"wdblock:{uid}",)).fetchone())
+    if uid in config.ADMIN_IDS:   # владелец забирает весь реферальный баланс: без холда, минимума, кулдауна и очереди
+        return {"balance": bal, "avail": round(bal, 2), "held": 0.0, "next_free": 0, "pending": None, "cool_until": 0}
     return {"balance": bal, "avail": round(avail, 2), "held": round(held, 2),
-            "next_free": (next_ts + hold) if next_ts else 0, "pending": pending, "cool_until": cool_until if cool_until > now else 0}
+            "next_free": (next_ts + hold) if next_ts else 0, "pending": pending, "cool_until": cool_until if cool_until > now else 0, "blocked": blocked}
+
+def _min(uid):
+    return 1 if uid in config.ADMIN_IDS else config.PAYOUT_MIN
 
 def mask(method, details):
     d_ = str(details)
@@ -203,15 +209,17 @@ def wd_screen(uid):
     L = ["<b>Вывод денег</b>", "",
          f"Можно вывести сейчас: <b>{rub(i['avail'])} ₽</b>",
          f"Ждёт {config.PAYOUT_HOLD_DAYS} дней после оплаты друга: {rub(i['held'])} ₽" + (f" (ближайшая сумма освободится {B.dfmt(i['next_free'])})" if i["next_free"] and i["held"] else ""),
-         f"Минимум: {config.PAYOUT_MIN} ₽. Не чаще раза в {config.PAYOUT_COOLDOWN_DAYS} дн.",
+         f"Минимум: {_min(uid)} ₽. Не чаще раза в {config.PAYOUT_COOLDOWN_DAYS} дн.",
          "Выплачиваем вручную: карта, СБП или USDT."]
     rows = []
-    if i["pending"]:
+    if i.get("blocked"):
+        L += ["", "Вывод для твоего аккаунта сейчас недоступен. Если это ошибка, напиши в поддержку."]
+    elif i["pending"]:
         L += ["", f"⏳ Заявка #{i['pending']['id']} на {rub(i['pending']['amount'])} ₽ уже в обработке."]
     elif i["cool_until"]:
         L += ["", f"Следующий вывод будет доступен {B.dfmt(i['cool_until'])}."]
-    elif i["avail"] < config.PAYOUT_MIN:
-        L += ["", f"Пока меньше минимума ({config.PAYOUT_MIN} ₽). Приглашай друзей, бонус копится."]
+    elif i["avail"] < _min(uid):
+        L += ["", f"Пока меньше минимума ({_min(uid)} ₽). Приглашай друзей, бонус копится."]
     else:
         rows.append([("Карта", "wd:m:card"), ("СБП", "wd:m:sbp")]); rows.append([("USDT", "wd:m:usdt")])
     rows.append([("Назад", "go:start")])
@@ -229,7 +237,7 @@ PROMPTS = {"card": "Пришли номер карты одним сообщен
 async def cb_wd_method(c: CallbackQuery):
     uid = c.from_user.id; method = c.data.split(":")[2]
     i = wd_info(uid)
-    if method not in METHODS or i["pending"] or i["cool_until"] or i["avail"] < config.PAYOUT_MIN:
+    if method not in METHODS or i.get("blocked") or i["pending"] or i["cool_until"] or i["avail"] < _min(uid):
         return await answer_cb(c, "Сейчас вывод недоступен.", True)
     B.WAIT_TOPUP.discard(uid); B.WAIT_PROMO.discard(uid); B.WAIT_EMAIL.pop(uid, None)
     WD[uid] = {"step": "details", "method": method, "ts": time.time()}
@@ -263,15 +271,15 @@ async def got_wd(m: Message):
             else: return await m.answer("Это не адрес TRC20. Он начинается с T и состоит из 34 символов. Проверь и пришли ещё раз.")
         st["details"] = value; st["step"] = "amount"
         i = wd_info(uid)
-        return await m.answer(f"Сколько вывести? Доступно {rub(i['avail'])} ₽, минимум {config.PAYOUT_MIN} ₽.\nПришли сумму числом или слово «всё».")
+        return await m.answer(f"Сколько вывести? Доступно {rub(i['avail'])} ₽, минимум {_min(uid)} ₽.\nПришли сумму числом или слово «всё».")
     if st["step"] == "amount":
         i = wd_info(uid)
-        if txt.lower() in ("всё", "все", "all"): amount = int(i["avail"])
+        if txt.lower() in ("всё", "все", "all"): amount = i["avail"] if uid in config.ADMIN_IDS else int(i["avail"])
         else:
             try: amount = float(txt.replace(",", ".").replace(" ", "")); assert amount == amount
             except Exception: return await m.answer("Пришли сумму числом, например 500, или слово «всё».")
         amount = round(amount, 2)
-        if amount < config.PAYOUT_MIN: return await m.answer(f"Минимум для вывода {config.PAYOUT_MIN} ₽.")
+        if amount < _min(uid): return await m.answer(f"Минимум для вывода {_min(uid)} ₽.")
         if amount > i["avail"] + 1e-9: return await m.answer(f"Можно вывести не больше {rub(i['avail'])} ₽.")
         st["amount"] = amount; st["step"] = "confirm"
         return await B.show(m, ("16_withdraw.png", f"<b>Проверь заявку</b>\n\nСумма: {rub(amount)} ₽\nКуда: {esc(mask(st['method'], st['details']))}\n\n"
@@ -284,7 +292,7 @@ async def cb_wd_ok(c: CallbackQuery):
     if not st or st.get("step") != "confirm":
         return await answer_cb(c, "Заявка устарела. Начни заново.", True)
     i = wd_info(uid)
-    if i["pending"] or i["cool_until"] or st["amount"] > i["avail"] + 1e-9 or st["amount"] < config.PAYOUT_MIN:
+    if i.get("blocked") or i["pending"] or i["cool_until"] or st["amount"] > i["avail"] + 1e-9 or st["amount"] < _min(uid):
         WD.pop(uid, None); return await answer_cb(c, "Сумма изменилась, начни заново.", True)
     amount = st["amount"]
     con.execute("UPDATE users SET balance=MAX(0, balance-?) WHERE id=?", (amount, uid))
@@ -298,7 +306,7 @@ async def cb_wd_ok(c: CallbackQuery):
     prev = con.execute("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE user_id=? AND status='paid'", (uid,)).fetchone()[0]
     await tell(config.ADMIN_IDS,
                f"💸 <b>Заявка на вывод #{pid}</b>\n{B.who(u)} · <code>{uid}</code>\nСумма: <b>{rub(amount)} ₽</b>\nСпособ: {METHODS[st['method']]}\n"
-               f"Реквизиты: <code>{esc(st['details'])}</code>\nВыплачено ему раньше: {rub(prev)} ₽",
+               f"Реквизиты: <code>{esc(st['details'])}</code>\nВыплачено ему раньше: {rub(prev)} ₽\n\n{B.features.fraud_line(uid)}",
                kb([("✅ Выплачено", f"wdp:ok:{pid}"), ("❌ Отклонить", f"wdp:no:{pid}")]))
 
 async def payout_paid(pid, actor_id):
@@ -722,7 +730,10 @@ async def cmd_top(m: Message):
     await m.answer("\n".join(L), disable_web_page_preview=True)
 
 @router.message(Command("funnel"), lambda m: m.from_user.id in config.ADMIN_IDS or m.from_user.id in config.ACCOUNTANT_IDS)
-async def cmd_funnel(m: Message):
+async def cmd_funnel(m: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    if arg.isdigit() and 1 <= int(arg) <= 3650:   # /funnel 30: только те, кто пришёл за последние N дней
+        return await m.answer(B.features.funnel_cohort(int(arg)))
     q = lambda sql, *a: con.execute(sql, a).fetchone()[0] or 0
     now = int(time.time()); real = "p.status='paid' AND p.method!='balance' AND p.plan!='topup'"
     users = q("SELECT COUNT(*) FROM users"); trial = q("SELECT COUNT(*) FROM users WHERE trial_used=1")
@@ -738,7 +749,10 @@ async def cmd_funnel(m: Message):
                    f"Платящие с активной подпиской сейчас: {active} ({pct(active, payers)})")
 
 @router.message(Command("export"), is_owner)
-async def cmd_export(m: Message):
+async def cmd_export(m: Message, command: CommandObject):
+    kind = (command.args or "users").strip().lower() or "users"
+    if kind != "users":
+        return await B.features.send_export(m, kind)   # payments | payouts | balance
     rows = con.execute("SELECT * FROM users ORDER BY created").fetchall()
     cols = ["id", "username", "name", "created", "sub_until", "trial_used", "topup", "balance", "ref_earned", "ref", "src", "banned", "email"]
     cols = [c for c in cols if rows and c in rows[0].keys()] or ["id"]
