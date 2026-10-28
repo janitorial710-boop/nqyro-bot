@@ -111,14 +111,33 @@ def _alt_rows(prefix):
     if config.CRYPTO_TOKEN: row.append(("₿ Крипта", f"{prefix}:crypto"))
     return [row] if row else []
 
+def _dfmt(secs):
+    """Секунды подписки -> «6 дн.» / «1 дн. 4 ч»."""
+    days, hours = divmod(int(secs) // 3600, 24)
+    return f"{days} дн." + (f" {hours} ч" if hours else "")
+
+def convert(u):
+    rub, secs = db.convert_quote(u)
+    bal = db.total_balance(u)
+    head = (f"<b>Обмен баланса на дни</b>\n\nНа балансе: {bal:.0f} ₽\nКурс: 1 день = {config.DAY_RATE:.1f} ₽ (как в тарифе на месяц)\n\n")
+    if not rub:
+        return ("07_profile.png", head + f"Для обмена нужно хотя бы {config.CONVERT_MIN} ₽ (это 1 день). Пополни баланс на любую сумму.",
+                kb([("Пополнить баланс", "go:topup")], [("Назад", "go:profile")]))
+    return ("07_profile.png", head + f"Обменяем {rub} ₽ → {_dfmt(secs)} подписки. Они добавятся к текущей дате окончания.\n\nДлинные тарифы выгоднее: там день дешевле.",
+            kb([(f"Обменять {rub} ₽ → {_dfmt(secs)}", "cvt:go")], [("Тарифы со скидкой", "go:plans")], [("Назад", "go:profile")]))
+
+def converted(u, rub, secs, until):
+    return ("06_success.png", f"<b>Готово</b>\n\nСписали {rub} ₽, добавили {_dfmt(secs)}.\nПодписка активна до {d(until)}.",
+            kb([("Подключиться", "go:connect")], [("Профиль", "go:profile")]))
+
 def topup(u):
     bonus = config.TOPUP_BONUS_PERCENT
-    amounts = [a for a in (300, 500, 1000, 2000) if config.TOPUP_MIN <= a <= config.TOPUP_MAX]
+    amounts = [a for a in (50, 100, 300, 500, 1000, 2000) if config.TOPUP_MIN <= a <= config.TOPUP_MAX]
     rows = [[(f"{a} ₽", f"topup:{a}") for a in amounts[i:i + 2]] for i in range(0, len(amounts), 2)]
     text = (f"<b>Пополнение баланса</b>\n\nСейчас на балансе: {db.total_balance(u):.0f} ₽\n"
             + (f"Бонус к пополнению: +{bonus}%\n" if bonus else "")
             + f"\nВыбери сумму или пришли свою (от {config.TOPUP_MIN} до {config.TOPUP_MAX} ₽). "
-              "Баланс можно потратить на подписку в любой момент.")
+              f"Любую сумму можно обменять на дни: 1 день = {config.DAY_RATE:.1f} ₽. Или потратить на тариф.")
     return ("07_profile.png", text, kb(*rows, [("Назад", "go:profile")]))
 
 def topup_pay(u, amount):
@@ -129,8 +148,9 @@ def topup_pay(u, amount):
                [("Другие способы", f"tpay:{amount}:any")], *_alt_rows(f"tpay:{amount}"), [("Назад", "go:topup")]))
 
 def topup_ok(u):
-    return ("06_success.png", f"<b>Баланс пополнен</b>\n\nТеперь на балансе: {db.total_balance(u):.0f} ₽.\nМожно оплатить подписку в один клик.",
-            kb([("Тарифы", "go:plans")], [("Профиль", "go:profile")]))
+    rub, secs = db.convert_quote(u)
+    return ("06_success.png", f"<b>Баланс пополнен</b>\n\nТеперь на балансе: {db.total_balance(u):.0f} ₽.\nМожно обменять на дни или оплатить тариф в один клик.",
+            kb(*([[(f"Обменять на дни · {_dfmt(secs)}", "go:convert")]] if rub else []), [("Тарифы", "go:plans")], [("Профиль", "go:profile")]))
 
 def partner(u):
     srcs = db.partner_sources(u["id"])
@@ -167,6 +187,7 @@ def profile(u):
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
         kb([("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")], [("Подключиться", "go:connect"), ("Промокод", "promo")],
+           *([[("Обменять баланс на дни", "go:convert")]] if db.convert_quote(u)[0] else []),
            *([[("🔁 Автопродление", "ar:open")]] if config.AUTORENEW else []),
            *([[("🤝 Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []), [("Поддержка", "go:support"), ("Назад", "go:start")]))
 

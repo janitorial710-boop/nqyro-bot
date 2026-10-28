@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS payments(
 """)
 
 for _sql in ("ALTER TABLE payments ADD COLUMN yk_id TEXT", "ALTER TABLE users ADD COLUMN email TEXT",
+             "ALTER TABLE payments ADD COLUMN secs INTEGER",             # сколько секунд подписки дал обмен баланса на дни
              "ALTER TABLE users ADD COLUMN topup REAL DEFAULT 0",        # основной баланс (пополняет админ)
              "ALTER TABLE users ADD COLUMN ref_earned REAL DEFAULT 0",   # всего заработано на рефералах
              "ALTER TABLE users ADD COLUMN username TEXT",               # @username в Telegram
@@ -120,7 +121,7 @@ def price_for(u, plan, gift=False):
 
 def last_plan(uid):
     """Тариф последней оплаты (не подарок) или None."""
-    r = con.execute("SELECT plan FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan!='topup' ORDER BY created DESC, id DESC LIMIT 1", (uid,)).fetchone()
+    r = con.execute("SELECT plan FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan NOT IN ('topup','days') ORDER BY created DESC, id DESC LIMIT 1", (uid,)).fetchone()
     return r["plan"] if r else None
 
 def create_sale(percent, start, end, title):
@@ -366,6 +367,31 @@ def pay_with_balance(uid, plan, gift=False):
     con.commit()
     return ("sub", extend(uid, days))
 
+def convert_quote(u, amount=None):
+    """(рублей к обмену, секунд подписки). По умолчанию обмениваем весь баланс целыми рублями.
+    Курс: цена месячного тарифа / его дни (config.DAY_RATE). Меньше CONVERT_MIN (~1 день) не меняем."""
+    total = int(total_balance(u))
+    rub = total if amount is None else min(int(amount), total)
+    if rub < config.CONVERT_MIN: return 0, 0
+    return rub, int(rub / config.DAY_RATE * 86400)
+
+def balance_to_days(uid, amount=None):
+    """Обмен баланса на дни по курсу. Списывает сначала реферальный, потом основной.
+    Возвращает (потрачено ₽, секунд, новая_дата_окончания) или None, если баланса мало."""
+    u = get_user(uid)
+    rub, secs = convert_quote(u, amount)
+    if not rub: return None
+    from_ref = min(u["balance"] or 0, rub)
+    from_main = rub - from_ref
+    cur = con.execute("UPDATE users SET balance=MAX(0,balance-?), topup=MAX(0,COALESCE(topup,0)-?) WHERE id=? AND balance>=? AND COALESCE(topup,0)>=?",
+                      (from_ref, from_main, uid, from_ref - 1e-9, from_main - 1e-9))
+    if cur.rowcount == 0:
+        con.rollback(); return None
+    con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift,secs) VALUES(?,?,?,?,?,?,0,?)",
+                (uid, "days", rub, "balance", "paid", int(time.time()), secs))
+    con.commit()
+    return rub, secs, extend(uid, secs / 86400)
+
 def due_reminders(now, within_days=3):
     return con.execute("SELECT * FROM users WHERE sub_until>? AND sub_until<? AND reminded_for!=sub_until",
                        (now, now + within_days * 86400)).fetchall()
@@ -489,9 +515,9 @@ def refund_plan(pid):
         info["gift_code"] = p["code"]
         _refund_bonus(p, info)
     else:
-        days = config.PLANS.get(p["plan"], (0, 0, ""))[1]
+        days = (p["secs"] or 0) / 86400 if p["plan"] == "days" else config.PLANS.get(p["plan"], (0, 0, ""))[1]
         u = get_user(p["user_id"])
-        info["days"] = days
+        info["days"] = round(days, 1) if p["plan"] == "days" else days
         info["new_until"] = max(now, u["sub_until"] - days * 86400) if u["sub_until"] > now else u["sub_until"]
         _refund_bonus(p, info)
     return "ok", p, info
@@ -539,7 +565,7 @@ def profit(since):
 
 def forecast(now, days=7):
     """Кто и на какую сумму может продлиться в ближайшие days дней (по прошлому тарифу каждого)."""
-    rows = con.execute("SELECT u.id, (SELECT plan FROM payments p WHERE p.user_id=u.id AND p.status='paid' AND COALESCE(p.gift,0)=0 AND p.plan!='topup' "
+    rows = con.execute("SELECT u.id, (SELECT plan FROM payments p WHERE p.user_id=u.id AND p.status='paid' AND COALESCE(p.gift,0)=0 AND p.plan NOT IN ('topup','days') "
                        "ORDER BY p.created DESC, p.id DESC LIMIT 1) AS plan FROM users u "
                        "WHERE COALESCE(u.banned,0)=0 AND u.sub_until>? AND u.sub_until<=?", (now, now + days * 86400)).fetchall()
     payers = [r for r in rows if r["plan"] in config.PLANS]

@@ -72,6 +72,7 @@ async def screen_for(key, uid):
     if key == "partner": return screens.partner(u)
     if key == "topup":
         WAIT_TOPUP.add(uid); return screens.topup(u)
+    if key == "convert": return screens.convert(u)
     if key == "connect":
         sub = await panel.ensure_user(uid) if u["sub_until"] > time.time() else None
         return screens.connect(u, sub)
@@ -252,6 +253,17 @@ async def cb_pay(c: CallbackQuery):
     if method in ("stars", "crypto"):
         await features.alt_payment(c, plan, method, gift); return await c.answer()
     await start_payment(c, c.from_user.id, plan, method, gift); await c.answer()
+
+@dp.callback_query(F.data == "cvt:go")
+async def cb_cvt_go(c: CallbackQuery):
+    """Обмен всего баланса на дни по курсу (config.DAY_RATE). Списание атомарное, двойное нажатие безопасно."""
+    uid = c.from_user.id
+    res = db.balance_to_days(uid)
+    if res is None:
+        return await c.answer(f"Маловато: нужно хотя бы {config.CONVERT_MIN} ₽ (это 1 день).", show_alert=True)
+    rub, secs, until = res
+    await panel.set_expiry(uid, until)
+    await show(c, screens.converted(db.get_user(uid), rub, secs, until)); await c.answer("Дни добавлены")
 
 def _topup_ok(amount):
     return config.TOPUP_MIN <= amount <= config.TOPUP_MAX

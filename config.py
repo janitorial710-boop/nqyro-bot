@@ -48,7 +48,7 @@ PANEL_SQUAD = os.getenv("PANEL_SQUAD", "")    # UUID internal squad (необя�
 HWID_LIMIT = int(os.getenv("HWID_LIMIT", "3"))
 
 # --- Пополнение баланса пользователем ---
-TOPUP_MIN = int(os.getenv("TOPUP_MIN", "100"))
+TOPUP_MIN = int(os.getenv("TOPUP_MIN", "50"))
 TOPUP_MAX = int(os.getenv("TOPUP_MAX", "15000"))
 TOPUP_BONUS_PERCENT = int(os.getenv("TOPUP_BONUS_PERCENT", "0"))   # бонус к пополнению, % (0 = выключен)
 
@@ -60,10 +60,13 @@ BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 # --- Вебхук ЮKassa (нужны WEB_PORT и OPEN_BASE) ---
 YK_WEBHOOK_SECRET = os.getenv("YK_WEBHOOK_SECRET", "")   # секрет в адресе: {OPEN_BASE}/yk/<секрет>; пусто = вебхук выключен
 
+DAY_RATE = PLANS["1"][0] / PLANS["1"][1]   # ₽ за 1 день по месячному тарифу (249/30 = 8.3 ₽): по нему баланс обменивается на дни
+CONVERT_MIN = int(-(-DAY_RATE // 1))       # минимум для обмена: ~1 день (9 ₽)
+
 def plan_name(key):
     """Название тарифа для отображения; 'topup' = пополнение баланса."""
     if key in PLANS: return PLANS[key][2]
-    return "пополнение баланса" if key == "topup" else str(key)
+    return {"topup": "пополнение баланса", "days": "дни подписки (с баланса)"}.get(key, str(key))
 
 # --- Вывод реферальных денег и прочее (extras.py) ---
 PAYOUT_MIN = int(os.getenv("PAYOUT_MIN", "250"))                      # минимальная сумма вывода, ₽
