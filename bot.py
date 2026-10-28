@@ -363,11 +363,11 @@ async def send_lines(m, header, lines, footer="", markup=None):
         chunk += line + "\n"
     await m.answer(chunk + footer, disable_web_page_preview=True, reply_markup=markup)
 
-def card_buttons(rows, limit=10):
+def card_buttons(rows, limit=90):   # 100 кнопок на сообщение: жёсткий предел Telegram
     """Кнопки «открыть карточку» под списком людей (по две в ряд)."""
     btns = []
     for u in rows[:limit]:
-        label = (u["name"] or ("@" + u["username"] if u["username"] else str(u["id"])))[:18]
+        label = ((u["name"] or "").strip() if (u["name"] or "").strip() not in ("", "?") else ("@" + u["username"] if u["username"] else str(u["id"])))[:18]
         btns.append((f"👤 {label}", f"adm:open:{u['id']}"))
     return screens.kb(*[btns[i:i + 2] for i in range(0, len(btns), 2)]) if btns else None
 
@@ -710,6 +710,26 @@ async def cb_rfn(c: CallbackQuery):
     except TelegramBadRequest: pass
     await c.answer()
 
+@dp.message(Command("takeref"), is_admin)
+async def cmd_takeref(m: Message, command: CommandObject):
+    """Списать реферальный баланс у человека: /takeref ID СУММА или /takeref ID всё."""
+    usage = "Формат: /takeref ID_или_@ник СУММА\n/takeref ID всё: забрать весь реферальный баланс\nОсновной баланс не трогает (для него /addbal ID -СУММА)."
+    a = (command.args or "").split()
+    if len(a) != 2: return await m.answer(usage)
+    u = resolve_user(a[0])
+    if not u: return await m.answer(NOT_FOUND)
+    cur = float(u["balance"] or 0)
+    if a[1].lower() in ("всё", "все", "all"): amount = cur
+    else:
+        try: amount = float(a[1].replace(",", ".").replace("₽", "")); assert amount > 0
+        except Exception: return await m.answer(usage)
+    amount = min(amount, cur)
+    if amount <= 0: return await m.answer(f"У {u['id']} реферальный баланс 0 ₽, списывать нечего.")
+    db.con.execute("UPDATE users SET balance=MAX(0, balance-?) WHERE id=?", (amount, u["id"])); db.con.commit()
+    alog(m, "takeref", u["id"], f"-{amount:.2f} ₽")
+    u = db.get_user(u["id"])
+    await m.answer(f"Списано {amount:.0f} ₽ у <code>{u['id']}</code>.\nРеферальный баланс: {u['balance']:.0f} ₽\nОсновной: {u['topup']:.0f} ₽", disable_web_page_preview=True)
+
 @dp.message(Command("mybal"), is_admin)
 async def cmd_mybal(m: Message, command: CommandObject):
     """Только для себя: крутить свой баланс без ID."""
@@ -810,7 +830,17 @@ async def cmd_users(m: Message, command: CommandObject):
     lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
     pages = (total + size - 1) // size
     tail = f"\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
-    await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail, card_buttons(rows))
+    await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail)
+
+@dp.message(Command("subs"), can_support)
+async def cmd_subs(m: Message):
+    """Все пользователи с активной подпиской, без лимита и страниц."""
+    rows = db.con.execute("SELECT * FROM users WHERE sub_until>? ORDER BY sub_until DESC, id", (int(time.time()),)).fetchall()
+    if not rows:
+        return await m.answer("Сейчас ни у кого нет активной подписки.")
+    rows = await fill_profiles(rows)
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
+    await send_lines(m, f"<b>С активной подпиской: {len(rows)}</b>", lines)
 
 @dp.message(Command("find"), can_support)
 async def cmd_find(m: Message, command: CommandObject):
@@ -886,6 +916,11 @@ async def cmd_user(m: Message, command: CommandObject):
         return await m.answer("Формат: /user ID или @ник\nПример: /user 123456789")
     u = resolve_user(command.args)
     if not u:
+        found = [] if command.args.strip().lstrip("-").isdigit() else db.find_users(command.args.strip())
+        if len(found) > 1:   # несколько совпадений: даём выбрать кнопкой
+            found = await fill_profiles(found)
+            lines = [f'{who(x)} · <code>{x["id"]}</code> · {sub_status(x)}' for x in found]
+            return await send_lines(m, f"<b>Найдено несколько: {len(found)}</b>", lines, markup=card_buttons(found))
         return await m.answer(NOT_FOUND)
     text, markup = await build_card(u["id"], m.from_user.id)
     await m.answer(text, reply_markup=markup, disable_web_page_preview=True)
@@ -1345,7 +1380,7 @@ ADMIN_HELP = (
     "<b>Продажи</b>\n"
     "/abandoned: кто начал оплату и не оплатил\n/auto: сколько автосообщений отправлено\n"
     "/sale 20% ДД.ММ.ГГГГ ДД.ММ.ГГГГ [название]: акция на все тарифы\n/sales: список акций\n/delsale НОМЕР\n\n"
-    "<b>Деньги</b>\n/mybal СУММА | ref СУММА | set СУММА | reset: крутить свой баланс\n"
+    "<b>Деньги</b>\n/takeref ID СУММА|всё: списать реферальный баланс у человека\n/mybal СУММА | ref СУММА | set СУММА | reset: крутить свой баланс\n"
     "/profit [дни]: выручка, расходы, прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/delcost НОМЕР\n"
     "/forecast: сколько может прийти на продлениях за неделю\nВозврат: кнопка «↩️» в /user и /payments (или /refund НОМЕР)\n\n"
     "<b>Рассылка</b>\n"
@@ -1355,7 +1390,7 @@ ADMIN_HELP = (
     "Алерты о падении панели, нод и ошибках ЮKassa приходят сами.\n"
     "Роли: SUPPORT_IDS (поддержка) и ACCOUNTANT_IDS (бухгалтер) в .env.\n" + extras.HELP_OWNER)
 SUPPORT_HELP = ("<b>Тебе доступна поддержка</b>\n\n/find ЗАПРОС: поиск по имени, @нику или ID\n/user ID: карточка человека\n"
-                "/users [стр]: список\n/expiring [дни]: у кого скоро конец подписки\n"
+                "/users [стр]: список\n/subs: все с активной подпиской, без лимита (без кнопок; человека открывать через /user ID или @ник)\n/expiring [дни]: у кого скоро конец подписки\n"
                 f"/give ID ДНИ [тихо]: выдать дни (до {config.SUPPORT_GIVE_MAX} за раз)" + extras.HELP_SUPPORT)
 ACCOUNTANT_HELP = ("<b>Тебе доступна бухгалтерия</b>\n\n/stats: сводка\n/payments [N]: последние оплаты\n/abandoned: брошенные оплаты\n/report: отчёт за сутки\n"
                    "/sources: источники трафика\n/profit [дни]: прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/forecast: прогноз продлений"
