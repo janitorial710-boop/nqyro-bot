@@ -214,7 +214,7 @@ def wd_screen(uid):
         L += ["", f"Пока меньше минимума ({config.PAYOUT_MIN} ₽). Приглашай друзей, бонус копится."]
     else:
         rows.append([("Карта", "wd:m:card"), ("СБП", "wd:m:sbp")]); rows.append([("USDT", "wd:m:usdt")])
-    rows.append([("Назад", "go:friends")])
+    rows.append([("Назад", "go:start")])
     return ("16_withdraw.png", "\n".join(L), kb(*rows))
 
 @router.callback_query(F.data == "wd:start")
@@ -293,7 +293,7 @@ async def cb_wd_ok(c: CallbackQuery):
     con.commit(); pid = cur.lastrowid; WD.pop(uid, None)
     await answer_cb(c)
     await B.show(c, ("17_withdraw_ok.png", f"<b>Заявка #{pid} принята</b>\n\nСумма: {rub(amount)} ₽\nКуда: {esc(mask(st['method'], st['details']))}\n\n"
-                     "Мы выплатим вручную и напишем тебе сюда.", kb([("Назад", "go:friends")])))
+                     "Мы выплатим вручную и напишем тебе сюда.", kb([("Главное меню", "go:start")])))
     u = db.peek_user(uid)
     prev = con.execute("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE user_id=? AND status='paid'", (uid,)).fetchone()[0]
     await tell(config.ADMIN_IDS,
@@ -321,7 +321,7 @@ async def payout_reject(pid, reason):
                 (int(time.time()), reason, mask(p["method"], p["details"]), pid)); con.commit()
     try:
         await B.show(_Target(p["user_id"]), ("16_withdraw.png", f"<b>Заявка #{pid} отклонена</b>\n\nПричина: {esc(reason)}\nДеньги вернулись на реферальный баланс ({rub(p['amount'])} ₽).",
-                                              kb([("Вывести заново", "wd:start")], [("Поддержка", "go:support")])))
+                                              kb([("Поддержка", "go:support")])))
     except Exception:
         logging.warning("не удалось сообщить об отказе %s", p["user_id"])
     return p
@@ -662,12 +662,16 @@ async def cmd_resettrial(m: Message, command: CommandObject):
 @router.message(Command("msg"), is_support)
 async def cmd_msg(m: Message, command: CommandObject):
     parts = (command.args or "").split(None, 1)
-    if len(parts) < 2: return await m.answer("Формат: /msg ID ТЕКСТ\nЛичное сообщение от бота. Поддерживается HTML.")
+    photo = B.photo_of(m)
+    if len(parts) < 2 and not (photo and parts):
+        return await m.answer("Формат: /msg ID ТЕКСТ\nЛичное сообщение от бота. Поддерживается HTML.\nС фото: пришли фото с подписью /msg ID ТЕКСТ (или ответь командой на фото).")
     u = B.resolve_user(parts[0])
     if not u: return await m.answer(B.NOT_FOUND)
+    text = parts[1] if len(parts) > 1 else ""
+    if photo and len(text) > 1000: return await m.answer("Подпись к фото: до 1000 символов.")
     try:
-        await B.bot.send_message(u["id"], parts[1], disable_web_page_preview=True)
-        B.alog(m, "msg", u["id"], parts[1][:100]); await m.answer(f"Отправлено: <code>{u['id']}</code>")
+        await B.send_maybe_photo(u["id"], text, photo)
+        B.alog(m, "msg", u["id"], ("[фото] " if photo else "") + text[:100]); await m.answer(f"Отправлено: <code>{u['id']}</code>")
     except TelegramForbiddenError: await m.answer("Не доставлено: человек заблокировал бота.")
     except TelegramBadRequest as e: await m.answer("Не доставлено: " + esc(e))
 
