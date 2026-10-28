@@ -710,6 +710,40 @@ async def cb_rfn(c: CallbackQuery):
     except TelegramBadRequest: pass
     await c.answer()
 
+@dp.message(Command("mybal"), is_admin)
+async def cmd_mybal(m: Message, command: CommandObject):
+    """Только для себя: крутить свой баланс без ID."""
+    usage = ("Свой баланс (только у тебя):\n"
+             "/mybal 5000: +5000 на основной\n/mybal -300: списать с основного\n"
+             "/mybal ref 500: +500 на реферальный (минус списывает)\n"
+             "/mybal set 1000: выставить основной ровно 1000, реферальный 0\n"
+             "/mybal reset: обнулить оба")
+    a = (command.args or "").split()
+    uid = m.from_user.id; db.get_user(uid)
+    def num(x):
+        v = float(x.replace(",", ".").replace("₽", ""))
+        assert abs(v) <= 100000000
+        return v
+    try:
+        if not a:
+            pass
+        elif a[0].lower() == "reset":
+            db.con.execute("UPDATE users SET topup=0, balance=0 WHERE id=?", (uid,))
+        elif a[0].lower() == "set" and len(a) == 2:
+            db.con.execute("UPDATE users SET topup=?, balance=0 WHERE id=?", (max(0.0, num(a[1])), uid))
+        elif a[0].lower() == "ref" and len(a) == 2:
+            db.con.execute("UPDATE users SET balance=MAX(0, COALESCE(balance,0)+?) WHERE id=?", (num(a[1]), uid))
+        elif len(a) == 1:
+            db.con.execute("UPDATE users SET topup=MAX(0, COALESCE(topup,0)+?) WHERE id=?", (num(a[0]), uid))
+        else:
+            return await m.answer(usage)
+        db.con.commit()
+    except Exception:
+        return await m.answer(usage)
+    u = db.get_user(uid)
+    if a: alog(m, "mybal", uid, " ".join(a))
+    await m.answer(f"Твой баланс:\nОсновной: {u['topup']:.0f} ₽\nРеферальный: {u['balance']:.0f} ₽\nВсего: {db.total_balance(u):.0f} ₽" + ("" if a else "\n\n" + usage))
+
 @dp.message(Command("delpromo"), is_admin)
 async def cmd_delpromo(m: Message, command: CommandObject):
     ok = command.args and db.delete_promo(command.args.strip())
@@ -1043,7 +1077,7 @@ async def do_ban(actor, uid, flag):
 
 ADM_PROMPTS = {"days": "Сколько дней выдать? Пришли число (например 14). Отмена: напиши «отмена».",
                "bal": "На сколько изменить основной баланс? Пришли сумму в рублях: 500 пополнит, -200 спишет. Отмена: напиши «отмена».",
-               "msg": "Пришли текст сообщения, я отправлю его человеку от имени бота. Отмена: напиши «отмена»."}
+               "msg": "Пришли текст сообщения или фото с подписью, я отправлю человеку от имени бота. Отмена: напиши «отмена»."}
 
 @dp.callback_query(F.data.startswith("adm:"))
 async def cb_adm(c: CallbackQuery):
@@ -1080,6 +1114,24 @@ async def cb_adm(c: CallbackQuery):
     except TelegramBadRequest:
         pass   # текст не изменился
     await c.answer((toast or "")[:190] or None)
+
+@dp.message(F.photo, lambda m: ADM_WAIT.get(m.from_user.id, ("",))[0] == "msg")
+async def got_adm_photo(m: Message):
+    me = m.from_user.id
+    act, tid, ts = ADM_WAIT.pop(me)
+    if time.time() - ts > 600:
+        return await m.answer("Время ввода вышло. Нажми кнопку на карточке ещё раз.")
+    if not _staff(me):
+        return await m.answer("Нет доступа.")
+    cap = (m.caption or "").strip()
+    try:
+        await bot.send_photo(tid, m.photo[-1].file_id, caption=("💬 Сообщение от поддержки:\n\n" + cap) if cap else "💬 Сообщение от поддержки", parse_mode=None)
+        alog(m, "msg", tid, "[фото] " + cap[:80]); res = "Отправлено с фото."
+    except Exception:
+        res = "Не доставилось (возможно, человек заблокировал бота)."
+    await m.answer(res)
+    text, markup = await build_card(tid, me)
+    await m.answer(text, reply_markup=markup, disable_web_page_preview=True)
 
 @dp.message(F.text, lambda m: m.from_user.id in ADM_WAIT and not m.text.startswith("/"))
 async def got_adm_input(m: Message):
@@ -1199,13 +1251,24 @@ async def cmd_expiring(m: Message, command: CommandObject):
     lines = [f'{who(u)} · <code>{u["id"]}</code> · до {tfmt(u["sub_until"])}' for u in rows]
     await send_lines(m, f"<b>Заканчивается в ближайшие {days} дн.: {len(rows)}</b>", lines, markup=card_buttons(rows))
 
+def photo_of(m):
+    """file_id фото: приложено к сообщению или в сообщении, на которое отвечает команда."""
+    if m.photo: return m.photo[-1].file_id
+    r = m.reply_to_message
+    return r.photo[-1].file_id if r and r.photo else None
+
+async def send_maybe_photo(chat_id, text, photo, **kw):
+    if photo:
+        return await bot.send_photo(chat_id, photo, caption=text or None, **kw)
+    return await bot.send_message(chat_id, text, disable_web_page_preview=True, **kw)
+
 SEGMENTS = {"all": "всем", "active": "с активной подпиской", "expired": "с закончившейся подпиской", "never": "без подписки"}
 BCAST = {}          # id админа -> (сегмент, текст), ждёт подтверждения
 BCAST_BUSY = False
 
 @dp.message(Command("broadcast"), is_admin)
 async def cmd_broadcast(m: Message, command: CommandObject):
-    usage = ("Формат: /broadcast [СЕГМЕНТ] ТЕКСТ\nСегменты: all (всем, по умолчанию), active (с подпиской), "
+    usage = ("Формат: /broadcast [СЕГМЕНТ] ТЕКСТ\nС картинкой: пришли фото с подписью /broadcast [СЕГМЕНТ] ТЕКСТ (или ответь командой на фото).\nСегменты: all (всем, по умолчанию), active (с подпиской), "
              "expired (подписка закончилась), never (без подписки).\n"
              "Пример: /broadcast active Завтра работы на серверах, возможны перебои.\n"
              "Поддерживается HTML: <b>жирный</b>, <i>курсив</i>. Сначала придёт предпросмотр.")
@@ -1214,13 +1277,14 @@ async def cmd_broadcast(m: Message, command: CommandObject):
     parts = raw.split(None, 1)
     if parts and parts[0].lower() in SEGMENTS:
         seg, text = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
-    if not text.strip() or len(text) > 3800:
-        return await m.answer(usage)
+    photo = photo_of(m)
+    if (not text.strip() and not photo) or len(text) > (1000 if photo else 3800):
+        return await m.answer(usage + ("\n\nПодпись к фото: до 1000 символов." if photo else ""))
     try:
-        await m.answer(text, disable_web_page_preview=True)
+        await send_maybe_photo(m.chat.id, text, photo)
     except TelegramBadRequest as e:
         return await m.answer("Ошибка в оформлении текста: " + html.escape(str(e)) + "\nПроверь HTML-теги или убери их.")
-    BCAST[m.from_user.id] = (seg, text)
+    BCAST[m.from_user.id] = (seg, text, photo)
     n = len(db.segment_ids(seg))
     await m.answer(f"☝️ Предпросмотр. Получат {SEGMENTS[seg]}: {n} чел.\n\nОтправить: /broadcastok\nОтменить: /broadcastcancel")
 
@@ -1228,7 +1292,7 @@ async def cmd_broadcast(m: Message, command: CommandObject):
 async def cmd_broadcastcancel(m: Message):
     await m.answer("Рассылка отменена." if BCAST.pop(m.from_user.id, None) else "Нечего отменять.")
 
-async def _broadcast(admin_id, ids, text):
+async def _broadcast(admin_id, ids, text, photo=None):
     global BCAST_BUSY
     BCAST_BUSY = True
     ok = blocked = failed = 0
@@ -1236,7 +1300,7 @@ async def _broadcast(admin_id, ids, text):
         for uid in ids:
             for attempt in (1, 2):
                 try:
-                    await bot.send_message(uid, text, disable_web_page_preview=True); ok += 1; break
+                    await send_maybe_photo(uid, text, photo); ok += 1; break
                 except TelegramRetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
                     if attempt == 2: failed += 1
@@ -1259,12 +1323,12 @@ async def cmd_broadcastok(m: Message):
     pending = BCAST.pop(m.from_user.id, None)
     if not pending:
         return await m.answer("Нет подготовленной рассылки. Сначала: /broadcast ТЕКСТ")
-    seg, text = pending
+    seg, text, photo = pending
     ids = db.segment_ids(seg)
     if not ids:
         return await m.answer("В этом сегменте никого нет.")
     alog(m, "broadcast", f"{len(ids)} чел.", f"сегмент {seg}: {text[:80]}")
-    asyncio.create_task(_broadcast(m.from_user.id, ids, text))
+    asyncio.create_task(_broadcast(m.from_user.id, ids, text, photo))
     await m.answer(f"Рассылка запущена: {len(ids)} чел. Примерно {max(1, len(ids) // 20)} сек. Отчёт пришлю сюда.")
 
 ADMIN_HELP = (
@@ -1281,11 +1345,11 @@ ADMIN_HELP = (
     "<b>Продажи</b>\n"
     "/abandoned: кто начал оплату и не оплатил\n/auto: сколько автосообщений отправлено\n"
     "/sale 20% ДД.ММ.ГГГГ ДД.ММ.ГГГГ [название]: акция на все тарифы\n/sales: список акций\n/delsale НОМЕР\n\n"
-    "<b>Деньги</b>\n"
+    "<b>Деньги</b>\n/mybal СУММА | ref СУММА | set СУММА | reset: крутить свой баланс\n"
     "/profit [дни]: выручка, расходы, прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/delcost НОМЕР\n"
     "/forecast: сколько может прийти на продлениях за неделю\nВозврат: кнопка «↩️» в /user и /payments (или /refund НОМЕР)\n\n"
     "<b>Рассылка</b>\n"
-    "/broadcast [all|active|expired|never] ТЕКСТ: предпросмотр\n/broadcastok: отправить\n/broadcastcancel: отменить\n\n"
+    "/broadcast [all|active|expired|never] ТЕКСТ: предпросмотр (с фото: фото с подписью /broadcast ...)\n/broadcastok: отправить\n/broadcastcancel: отменить\n\n"
     "<b>Контроль</b>\n"
     "/report: отчёт за сутки (утром приходит сам)\n/log [N]: журнал действий админов и поддержки\n"
     "Алерты о падении панели, нод и ошибках ЮKassa приходят сами.\n"
