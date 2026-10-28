@@ -46,6 +46,7 @@ def connect(u, sub=None):
             *([[b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=quote(sub, safe="")))],
                [b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=quote(sub, safe="")))]] if config.OPEN_URL else []),
             [Btn(text="Скопировать ссылку", copy_text=CopyTextButton(text=sub))],
+            [b("Устройства", "dev:open"), b("Не работает?", "faq:open")],
             [b("Назад", "go:start")]]))
 
 def _rub(n): return f"{n:,}".replace(",", " ")
@@ -163,7 +164,7 @@ def friends(u):
         f"<b>Приглашай друзей</b>\n\nДруг получает 5 дней бесплатно, а ты {config.REF_PERCENT}% с каждой его оплаты на свой баланс.\n\n"
         f"Приглашено: {n} · Заработано: {earned:.0f} ₽\nНа реферальном балансе: {bal:.0f} ₽\n"
         f"Им можно оплатить подписку.\n\nТвоя ссылка:\n<code>{link}</code>",
-        kb([("Оплатить подписку балансом", "go:plans")], [("Назад", "go:start")]))
+        kb([("Оплатить подписку балансом", "go:plans")], [("Вывести деньги", "wd:start")], [("Назад", "go:start")]))
 
 def expiring(u):
     return ("09_expiring.png", "<b>Подписка заканчивается через 3 дня</b>\n\nПродли сейчас, и доступ не прервётся.",
@@ -171,7 +172,8 @@ def expiring(u):
 
 def support(u):
     return ("10_support.png", "<b>Поддержка</b>\n\nНапиши нам, если не получается подключиться или оплатить. Приложи скриншот, так будет быстрее.",
-        kb([("Написать в поддержку", "url:https://t.me/" + config.SUPPORT_USERNAME)], [("Назад", "go:start")]))
+        kb([("Частые вопросы", "faq:open"), ("Создать обращение", "tk:new")],
+           [("Написать в Telegram", "url:https://t.me/" + config.SUPPORT_USERNAME)], [("Назад", "go:start")]))
 
 def error(u):
     return ("11_error.png", "<b>Что-то пошло не так</b>\n\nПлатёж не прошёл или соединение не удалось. Попробуй ещё раз или напиши нам.",

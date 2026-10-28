@@ -1,4 +1,4 @@
-import asyncio, html, logging, os, re, time
+import asyncio, html, logging, os, re, sys, time
 from datetime import datetime, timedelta, timezone
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, BotCommandScopeChat, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
-import backup, config, db, monitor, panel, payments, redirect, screens
+import backup, config, db, extras, monitor, panel, payments, redirect, screens
 
 bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -832,6 +832,8 @@ async def build_card(uid, viewer):
             L.append(f'Лимит устройств: {info["hwidDeviceLimit"]}')
     elif config.PANEL_URL:
         L.append("\nПанель: пользователя там нет или она недоступна.")
+    _note = extras.card_note_line(uid)
+    if _note: L.append("\n" + _note)
     owner = viewer in config.ADMIN_IDS
     rows = [[(f"+{d} дн.", f"adm:give:{uid}:{d}") for d in (7, 30) if owner or d <= config.SUPPORT_GIVE_MAX] + [("Свои дни", f"adm:days:{uid}")]]
     if owner:
@@ -839,6 +841,7 @@ async def build_card(uid, viewer):
                      ("💰 Баланс ±", f"adm:bal:{uid}")])
     rows.append([("✉️ Написать", f"adm:msg:{uid}"), ("🔄 Обновить", f"adm:card:{uid}")])
     if owner:
+        rows += extras.card_rows(uid)
         for p in pays[:3]:
             rows.append([(f"↩️ Возврат #{p['id']} · {p['amount']} ₽ · {tfmt(p['created'], '%d.%m')}", f"rf:{p['id']}")])
     return "\n".join(L), screens.kb(*rows)
@@ -1286,12 +1289,13 @@ ADMIN_HELP = (
     "<b>Контроль</b>\n"
     "/report: отчёт за сутки (утром приходит сам)\n/log [N]: журнал действий админов и поддержки\n"
     "Алерты о падении панели, нод и ошибках ЮKassa приходят сами.\n"
-    "Роли: SUPPORT_IDS (поддержка) и ACCOUNTANT_IDS (бухгалтер) в .env.")
+    "Роли: SUPPORT_IDS (поддержка) и ACCOUNTANT_IDS (бухгалтер) в .env.\n" + extras.HELP_OWNER)
 SUPPORT_HELP = ("<b>Тебе доступна поддержка</b>\n\n/find ЗАПРОС: поиск по имени, @нику или ID\n/user ID: карточка человека\n"
                 "/users [стр]: список\n/expiring [дни]: у кого скоро конец подписки\n"
-                f"/give ID ДНИ [тихо]: выдать дни (до {config.SUPPORT_GIVE_MAX} за раз)")
+                f"/give ID ДНИ [тихо]: выдать дни (до {config.SUPPORT_GIVE_MAX} за раз)" + extras.HELP_SUPPORT)
 ACCOUNTANT_HELP = ("<b>Тебе доступна бухгалтерия</b>\n\n/stats: сводка\n/payments [N]: последние оплаты\n/abandoned: брошенные оплаты\n/report: отчёт за сутки\n"
-                   "/sources: источники трафика\n/profit [дни]: прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/forecast: прогноз продлений")
+                   "/sources: источники трафика\n/profit [дни]: прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/forecast: прогноз продлений"
+                   "\n/funnel: воронка\n/surveystats: почему не продлевают")
 
 def _ago(ts): return tfmt(ts, "%d.%m %H:%M")
 
@@ -1439,6 +1443,8 @@ async def main():
         BotCommand(command="friends", description="Пригласить друга"),
         BotCommand(command="promo", description="Ввести промокод"),
         BotCommand(command="support", description="Поддержка")]
+    extras.init(sys.modules[__name__])
+    dp.include_router(extras.router)
     await bot.set_my_commands(public_cmds)
     admin_cmds = public_cmds + [
         BotCommand(command="admin", description="Команды админа"),
@@ -1450,7 +1456,7 @@ async def main():
         BotCommand(command="payments", description="Последние оплаты"),
         BotCommand(command="give", description="Выдать дни"),
         BotCommand(command="broadcast", description="Рассылка"),
-        BotCommand(command="sources", description="Источники трафика и партнёры")]
+        BotCommand(command="sources", description="Источники трафика и партнёры")] + [BotCommand(command=c, description=d_) for c, d_ in extras.OWNER_MENU]
     for aid in config.ADMIN_IDS:
         try:
             await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=aid))
@@ -1459,7 +1465,7 @@ async def main():
     role_cmds = {
         "support": [BotCommand(command="admin", description="Команды"), BotCommand(command="find", description="Найти человека"),
                     BotCommand(command="user", description="Карточка человека"), BotCommand(command="expiring", description="Скоро конец подписки"),
-                    BotCommand(command="give", description="Выдать дни")],
+                    BotCommand(command="give", description="Выдать дни")] + [BotCommand(command=c, description=d_) for c, d_ in extras.SUPPORT_MENU],
         "accountant": [BotCommand(command="admin", description="Команды"), BotCommand(command="stats", description="Статистика"),
                        BotCommand(command="payments", description="Последние оплаты"), BotCommand(command="report", description="Отчёт за сутки"),
                        BotCommand(command="sources", description="Источники трафика")]}
@@ -1476,6 +1482,7 @@ async def main():
     asyncio.create_task(backup.run(send_backup))
     asyncio.create_task(monitor.run(notify_admins))
     asyncio.create_task(morning_report())
+    extras.start_loops()
     if config.AUTO_MSGS:
         asyncio.create_task(autos())
     for p in db.pending_payments():

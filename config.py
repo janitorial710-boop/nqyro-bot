@@ -64,3 +64,10 @@ def plan_name(key):
     """Название тарифа для отображения; 'topup' = пополнение баланса."""
     if key in PLANS: return PLANS[key][2]
     return "пополнение баланса" if key == "topup" else str(key)
+
+# --- Вывод реферальных денег и прочее (extras.py) ---
+PAYOUT_MIN = int(os.getenv("PAYOUT_MIN", "250"))                      # минимальная сумма вывода, ₽
+PAYOUT_HOLD_DAYS = int(os.getenv("PAYOUT_HOLD_DAYS", "14"))           # сколько дней бонус «вылёживается» перед выводом
+PAYOUT_COOLDOWN_DAYS = int(os.getenv("PAYOUT_COOLDOWN_DAYS", "7"))    # не чаще одного вывода за N дней
+SURVEY_AFTER_DAYS = int(os.getenv("SURVEY_AFTER_DAYS", "2"))          # через сколько дней после конца подписки спросить «почему не продлил»
+DEVICE_RESET_COOLDOWN_MIN = int(os.getenv("DEVICE_RESET_COOLDOWN_MIN", "10"))   # как часто человек может сбрасывать устройства сам
