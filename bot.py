@@ -856,10 +856,11 @@ async def cb_tar(c: CallbackQuery):
 
 # ---------- журнал: кто кому что дарил и покупал ----------
 def _clean_name(nm):
-    """Выкидывает невидимые символы (пробелы нулевой ширины, «пустые» хангыль-символы): иначе имя выглядит пустым."""
+    """Выкидывает невидимые символы. Если в имени нет ни одной видимой буквы, цифры или знака, возвращает пустую строку."""
     import unicodedata
-    bad = {"\u3164", "\u115f", "\u1160", "\u2800", "\u00a0"}
-    return "".join(ch for ch in (nm or "") if ch not in bad and unicodedata.category(ch) not in ("Cf", "Cc", "Zs", "Zl", "Zp")).strip()
+    fillers = {"\u3164", "\u115f", "\u1160", "\uffa0", "\u2800", "\u00a0", "\u17b4", "\u17b5", "\u034f", "\u180e"}
+    s = "".join(ch for ch in (nm or "") if ch not in fillers and unicodedata.category(ch) not in ("Cf", "Cc", "Cn", "Co", "Zs", "Zl", "Zp")).strip()
+    return s if any(unicodedata.category(ch)[0] in "LNPS" for ch in s) else ""
 
 def _bl_name(uid):
     """Кликабельный человек: с @ником открывается его профиль (t.me), без ника: ссылка по ID + ID, который копируется нажатием."""

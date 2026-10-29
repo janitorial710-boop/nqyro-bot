@@ -46,6 +46,7 @@ PANEL_URL = os.getenv("PANEL_URL", "")        # например https://panel.e
 PANEL_TOKEN = os.getenv("PANEL_TOKEN", "")    # API-токен: Remnawave -> Settings -> API Tokens
 PANEL_SQUAD = os.getenv("PANEL_SQUAD", "")    # UUID internal squad (необязательно)
 HWID_LIMIT = int(os.getenv("HWID_LIMIT", "3"))
+AUTO_FREE_DEVICE = os.getenv("AUTO_FREE_DEVICE", "1") != "0"   # при «Добавить в Happ/Incy» освобождать слот, если лимит устройств исчерпан
 
 # --- Пополнение баланса пользователем ---
 TOPUP_MIN = int(os.getenv("TOPUP_MIN", "50"))

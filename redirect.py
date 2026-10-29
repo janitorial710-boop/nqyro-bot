@@ -7,7 +7,7 @@ Telegram не принимает ссылки happ:// и incy:// в кнопка
 import asyncio, hmac, html, logging
 from urllib.parse import urlparse
 from aiohttp import web
-import config, db
+import config, db, panel
 
 ON_PAYMENT = None   # сюда bot.py кладёт функцию проверки платежа (она сама сверяется с ЮKassa)
 _tasks = set()
@@ -40,6 +40,9 @@ async def open_app(request: web.Request) -> web.Response:
     u = urlparse(sub)
     if app not in SCHEMES or u.scheme != "https" or not u.hostname or not _allowed_host(u.hostname):
         return web.Response(status=400, text="Bad request")
+    if config.AUTO_FREE_DEVICE:   # старая запись устройства от удалённой подписки не должна блокировать повторное добавление
+        try: await asyncio.wait_for(panel.free_device_slot_by_sub(sub), 8)
+        except Exception: logging.exception("free device slot failed")
     deeplink = SCHEMES[app] + sub
     body = PAGE.format(title=TITLES[app], deeplink=html.escape(deeplink, quote=True),
                        deeplink_js='"' + deeplink.replace("\\", "\\\\").replace('"', '\\"').replace("<", "%3C") + '"',

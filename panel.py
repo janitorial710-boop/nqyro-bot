@@ -5,6 +5,7 @@
 Сбой панели не роняет бота: ошибка пишется в лог, а при следующем «Подключиться» дата синхронизируется заново.
 """
 import logging, time
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 import aiohttp
 import config, db
@@ -188,3 +189,36 @@ async def sync_many(items, pause: float = 0.15):
             logging.exception("sync_many uid=%s", uid); bad += 1
         await asyncio.sleep(pause)
     return ok, bad
+
+
+_freed = {}   # uuid человека -> когда последний раз освобождали слот (защита от повторных обновлений страницы)
+
+async def free_device_slot_by_sub(sub: str) -> int:
+    """Вызывается, когда человек нажимает «Добавить в Happ/Incy». Если лимит устройств исчерпан (чаще всего из-за старой записи
+    от удалённой подписки), отвязывает самые давние устройства, чтобы осталось место под новое. Возвращает, сколько отвязано.
+    Владельца определяем по самой ссылке-подписке (она секретная), так что чужие устройства по чужому ID не тронуть."""
+    if not config.PANEL_URL or not config.PANEL_TOKEN:
+        return 0
+    short = urlparse(sub).path.rstrip("/").rsplit("/", 1)[-1]
+    if not short:
+        return 0
+    st, u = await _call("GET", f"/api/users/by-short-uuid/{short}")
+    if isinstance(u, list): u = u[0] if u else None
+    if st != 200 or not u or (u.get("subscriptionUrl") or "").rstrip("/") != sub.rstrip("/"):
+        return 0
+    limit = u.get("hwidDeviceLimit") or config.HWID_LIMIT
+    if limit <= 0 or time.time() - _freed.get(u["uuid"], 0) < 600:
+        return 0
+    data = await _ok("GET", f"/api/hwid/devices/{u['uuid']}")
+    devs = (data.get("devices") if isinstance(data, dict) else data) or []
+    excess = len(devs) - (limit - 1)
+    if excess <= 0:
+        return 0
+    devs.sort(key=lambda d: d.get("updatedAt") or d.get("createdAt") or "")   # самые давние первыми
+    n = 0
+    for d in devs[:excess]:
+        await _ok("POST", "/api/hwid/devices/delete", json={"userUuid": u["uuid"], "hwid": d["hwid"]})
+        n += 1
+    _freed[u["uuid"]] = time.time()
+    logging.info("freed %s device slot(s) for %s", n, u.get("username"))
+    return n
