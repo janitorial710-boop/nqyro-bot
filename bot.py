@@ -369,6 +369,16 @@ def sub_status(u):
     if s: return "истекла " + dfmt(s)
     return "нет подписки"
 
+def _paid_ids():
+    """Кто хоть раз реально оплачивал подписку (не подарок, не пополнение, не возврат)."""
+    return {r[0] for r in db.con.execute("SELECT DISTINCT user_id FROM payments WHERE status='paid' AND COALESCE(gift,0)=0 AND plan!='topup'")}
+
+def sub_label(u, paid):
+    """💎 платная · 🆓 пробник · 🎁 дни выданы/подарены/по коду. Только для активной подписки."""
+    if (u["sub_until"] or 0) <= time.time(): return ""
+    if u["id"] in paid: return "💎 "
+    return "🆓 " if u["trial_used"] else "🎁 "
+
 def who(u):
     name = html.escape(u["name"] or "") or "без имени"
     link = f'https://t.me/{u["username"]}' if u["username"] else f'tg://user?id={u["id"]}'
@@ -770,6 +780,127 @@ async def cmd_takeref(m: Message, command: CommandObject):
     u = db.get_user(u["id"])
     await m.answer(f"Списано {amount:.0f} ₽ у <code>{u['id']}</code>.\nРеферальный баланс: {u['balance']:.0f} ₽\nОсновной: {u['topup']:.0f} ₽", disable_web_page_preview=True)
 
+# ---------- массово забрать реферальные деньги ----------
+_NUM = re.compile(r"[+-]?\d+(?:[.,]\d+)?")
+
+def _ref_grants():
+    """{id: сколько реферальных ₽ выдано вручную (/addref) и ещё не списано (/takeref)} по журналу действий."""
+    g = {}
+    for r in db.con.execute("SELECT action, target, details FROM admin_log WHERE action IN ('addref','takeref')"):
+        try: uid = int(r["target"])
+        except (TypeError, ValueError): continue
+        mt = _NUM.search(r["details"] or "")
+        if not mt: continue
+        v = float(mt.group().replace(",", "."))
+        g[uid] = g.get(uid, 0.0) + (v if r["action"] == "addref" else -abs(v))
+    return {k: v for k, v in g.items() if v > 0}
+
+def _tar_plan(mode):
+    """[(id, сколько забрать)]. mode 'g': только выданное мной через /addref; 'a': весь реферальный баланс. Владельцев не трогаем."""
+    grants = _ref_grants()
+    out = []
+    for r in db.con.execute("SELECT id, balance FROM users WHERE COALESCE(balance,0)>0.005"):
+        if r["id"] in config.ADMIN_IDS: continue
+        bal = float(r["balance"])
+        amt = bal if mode == "a" else min(bal, grants.get(r["id"], 0.0))
+        if amt > 0.005: out.append((r["id"], round(amt, 2)))
+    return out
+
+@dp.message(Command("takeallref"), is_admin)
+async def cmd_takeallref(m: Message):
+    """Одной командой забрать реферальные деньги у всех: с превью и кнопками."""
+    g, a = _tar_plan("g"), _tar_plan("a")
+    if not a: return await m.answer("Ни у кого нет реферального баланса, забирать нечего.")
+    sg, sa = sum(x for _, x in g), sum(x for _, x in a)
+    text = (f"<b>Реферальные деньги у людей</b>\n\nВсего: <b>{sa:.0f} ₽</b> у {len(a)} чел.\n"
+            f"Из них выдано тобой через /addref: <b>{sg:.0f} ₽</b> у {len(g)} чел. (по журналу /log)\n\n"
+            "«Выданное мной» забирает только то, что ты начислял руками. «Весь баланс» забирает и честно заработанное на друзьях и партнёрских.\n"
+            "Основной баланс (пополнения) не трогаю. Людям ничего не отправляется.")
+    rows = []
+    if g: rows.append([(f"Забрать выданное мной · {sg:.0f} ₽", "tar:g")])
+    rows.append([(f"Забрать весь реф. баланс · {sa:.0f} ₽", "tar:a")])
+    rows.append([("Отмена", "tar:x")])
+    await m.answer(text, reply_markup=screens.kb(*rows))
+
+@dp.callback_query(F.data.startswith("tar:"))
+async def cb_tar(c: CallbackQuery):
+    if c.from_user.id not in config.ADMIN_IDS:
+        return await c.answer("Только для владельца", show_alert=True)
+    mode = c.data.split(":")[1]
+    if mode == "x":
+        try: await c.message.edit_text("Отменено.", reply_markup=None)
+        except TelegramBadRequest: pass
+        return await c.answer()
+    if mode not in ("g", "a"): return await c.answer()
+    plan = _tar_plan(mode)   # пересчитываем заново: между превью и нажатием баланс мог измениться
+    if not plan:
+        try: await c.message.edit_text("Забирать уже нечего.", reply_markup=None)
+        except TelegramBadRequest: pass
+        return await c.answer()
+    now = int(time.time()); label = "выданное мной" if mode == "g" else "весь баланс"
+    for uid, amt in plan:
+        if mode == "g":   # выданные руками деньги в «заработано» попали через /addref, убираем и оттуда
+            db.con.execute("UPDATE users SET balance=MAX(0,balance-?), ref_earned=MAX(0,COALESCE(ref_earned,0)-?) WHERE id=?", (amt, amt, uid))
+        else:
+            db.con.execute("UPDATE users SET balance=MAX(0,balance-?) WHERE id=?", (amt, uid))
+    db.con.executemany("INSERT INTO admin_log(ts,admin_id,action,target,details) VALUES(?,?,?,?,?)",
+                       [(now, c.from_user.id, "takeref", str(uid), f"-{amt:.2f} ₽ (массово: {label})") for uid, amt in plan])
+    db.con.commit()
+    total = sum(x for _, x in plan)
+    top = sorted(plan, key=lambda x: -x[1])[:10]
+    lines = "\n".join(f"<code>{uid}</code>: {amt:.0f} ₽" for uid, amt in top)
+    text = f"Готово ({label}). Забрал <b>{total:.0f} ₽</b> у {len(plan)} чел.\n\nБольше всего:\n{lines}\n\nКаждое списание записано в /log."
+    try: await c.message.edit_text(text, reply_markup=None)
+    except TelegramBadRequest: await c.message.answer(text)
+    await c.answer("Готово")
+
+# ---------- журнал: кто кому что дарил и покупал ----------
+def _bl_name(uid):
+    u = db.peek_user(uid)
+    if not u: return f"<code>{uid}</code>"
+    nm = (u["name"] or "").strip()
+    if nm in ("", "?", "(без имени)", "(профиль недоступен)"): nm = ("@" + u["username"]) if u["username"] else str(uid)
+    return f'<a href="tg://user?id={uid}">{html.escape(nm)}</a>'
+
+@dp.message(Command("buylog"), is_admin)
+async def cmd_buylog(m: Message, command: CommandObject):
+    """Один журнал: покупки, подарки (кто → кому), пополнения, обмен баланса на дни. /buylog [N] [ID или @ник]"""
+    n, target = 30, None
+    for tok in (command.args or "").split():
+        if tok.isdigit() and int(tok) <= 300: n = max(1, int(tok))
+        else:
+            target = resolve_user(tok)
+            if not target: return await m.answer(NOT_FOUND)
+    sql = ("SELECT p.*, pu.user_id AS rcv, pu.ts AS rcv_ts FROM payments p LEFT JOIN promo_uses pu ON pu.code=p.code AND p.gift=1 "
+           "WHERE p.status IN ('paid','refunded')")
+    args = []
+    if target:
+        sql += " AND (p.user_id=? OR pu.user_id=?)"; args += [target["id"], target["id"]]
+    rows = db.con.execute(sql + " ORDER BY p.created DESC, p.id DESC LIMIT ?", args + [n]).fetchall()
+    if not rows: return await m.answer("Покупок и подарков пока нет.")
+    ids = {r["user_id"] for r in rows} | {r["rcv"] for r in rows if r["rcv"]}
+    await fill_profiles([{"id": i} for i in ids])
+    lines, gifts, buys = [], 0, 0
+    for r in rows:
+        t = _ago(r["created"]); who_ = _bl_name(r["user_id"]); amt = r["amount"] or 0
+        how = "с баланса" if r["method"] == "balance" else (r["method"] or "")
+        plan = r["plan"]; lab = config.PLANS[plan][2] if plan in config.PLANS else plan
+        back = " · ↩️ возврат" if r["status"] == "refunded" else ""
+        if r["gift"]:
+            gifts += 1
+            to = (f"→ {_bl_name(r['rcv'])}" if r["rcv"] else f"→ пока никому (код <code>{html.escape(r['code'] or '?')}</code>)")
+            lines.append(f"🎁 {t} · {who_} {to}\n   {lab} · {amt:.0f} ₽ · {how}{back}")
+        elif plan == "topup":
+            bn = f" (+{r['bonus']:.0f} бонус)" if r["bonus"] else ""
+            lines.append(f"💳 {t} · {who_} пополнил баланс на {amt:.0f} ₽{bn} · {how}{back}")
+        elif plan == "days":
+            lines.append(f"⏳ {t} · {who_} обменял {amt:.0f} ₽ баланса на {(r['secs'] or 0) / 86400:.1f} дн.{back}")
+        else:
+            buys += 1
+            lines.append(f"🛒 {t} · {who_} купил «{lab}» · {amt:.0f} ₽ · {how}{back}")
+    head = f"<b>Журнал покупок и подарков</b>" + (f" · {_bl_name(target['id'])}" if target else "") + f"\nПоследние {len(rows)}: покупок {buys}, подарков {gifts}"
+    await send_lines(m, head, lines, "\n/buylog 100: больше · /buylog @ник: по человеку")
+
 @dp.message(Command("mybal"), is_admin)
 async def cmd_mybal(m: Message, command: CommandObject):
     """Только для себя: крутить свой баланс без ID."""
@@ -867,7 +998,8 @@ async def cmd_users(m: Message, command: CommandObject):
     if not rows:
         return await m.answer(f"Пользователей: {total}. На странице {page} пусто.")
     rows = await fill_profiles(rows)
-    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
+    paid = _paid_ids()
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_label(u, paid)}{sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
     pages = (total + size - 1) // size
     tail = f"\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
     await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail)
@@ -879,8 +1011,11 @@ async def cmd_subs(m: Message):
     if not rows:
         return await m.answer("Сейчас ни у кого нет активной подписки.")
     rows = await fill_profiles(rows)
-    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
-    await send_lines(m, f"<b>С активной подпиской: {len(rows)}</b>", lines)
+    paid = _paid_ids()
+    kinds = [sub_label(u, paid) for u in rows]
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {k}{sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u, k in zip(rows, kinds)]
+    head = f"<b>С активной подпиской: {len(rows)}</b>\n💎 платных: {kinds.count('💎 ')} · 🆓 пробник: {kinds.count('🆓 ')} · 🎁 выдано/подарок: {kinds.count('🎁 ')}"
+    await send_lines(m, head, lines)
 
 @dp.message(Command("find"), can_support)
 async def cmd_find(m: Message, command: CommandObject):
@@ -1426,7 +1561,7 @@ ADMIN_HELP = (
     "<b>Продажи</b>\n"
     "/abandoned: кто начал оплату и не оплатил\n/auto: сколько автосообщений отправлено\n"
     "/sale 20% ДД.ММ.ГГГГ ДД.ММ.ГГГГ [название]: акция на все тарифы\n/sales: список акций\n/delsale НОМЕР\n\n"
-    "<b>Деньги</b>\n/takeref ID СУММА|всё: списать реферальный баланс у человека\n/mybal СУММА | ref СУММА | set СУММА | reset: крутить свой баланс\n"
+    "<b>Деньги</b>\n/takeref ID СУММА|всё: списать реферальный баланс у человека\n/takeallref: забрать реферальные деньги у всех (выданное мной или весь баланс)\n/buylog [N] [ID]: кто кому что дарил и покупал\n/mybal СУММА | ref СУММА | set СУММА | reset: крутить свой баланс\n"
     "/profit [дни]: выручка, расходы, прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/delcost НОМЕР\n"
     "/forecast: сколько может прийти на продлениях за неделю\nВозврат: кнопка «↩️» в /user и /payments (или /refund НОМЕР)\n\n"
     "<b>Рассылка</b>\n"
