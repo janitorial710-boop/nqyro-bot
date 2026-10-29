@@ -855,12 +855,22 @@ async def cb_tar(c: CallbackQuery):
     await c.answer("Готово")
 
 # ---------- журнал: кто кому что дарил и покупал ----------
+def _clean_name(nm):
+    """Выкидывает невидимые символы (пробелы нулевой ширины, «пустые» хангыль-символы): иначе имя выглядит пустым."""
+    import unicodedata
+    bad = {"\u3164", "\u115f", "\u1160", "\u2800", "\u00a0"}
+    return "".join(ch for ch in (nm or "") if ch not in bad and unicodedata.category(ch) not in ("Cf", "Cc", "Zs", "Zl", "Zp")).strip()
+
 def _bl_name(uid):
+    """Кликабельный человек: с @ником открывается его профиль (t.me), без ника: ссылка по ID + ID, который копируется нажатием."""
     u = db.peek_user(uid)
-    if not u: return f"<code>{uid}</code>"
-    nm = (u["name"] or "").strip()
-    if nm in ("", "?", "(без имени)", "(профиль недоступен)"): nm = ("@" + u["username"]) if u["username"] else str(uid)
-    return f'<a href="tg://user?id={uid}">{html.escape(nm)}</a>'
+    if not u: return f'<a href="tg://user?id={uid}">{uid}</a>'
+    nm = _clean_name(u["name"])
+    if nm in ("?", "(без имени)", "(профиль недоступен)"): nm = ""
+    un = (u["username"] or "").strip().lstrip("@")
+    label = html.escape(nm or (("@" + un) if un else str(uid)))
+    if un: return f'<a href="https://t.me/{un}">{label}</a>'
+    return f'<a href="tg://user?id={uid}">{label}</a> <code>{uid}</code>'
 
 @dp.message(Command("buylog"), is_admin)
 async def cmd_buylog(m: Message, command: CommandObject):
