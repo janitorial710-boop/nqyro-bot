@@ -93,7 +93,10 @@ async def cmd_start(m: Message, command: CommandObject):
         except ValueError: pass
     elif command.args and command.args.startswith("src_") and db.src_get(command.args[4:]):
         src = command.args[4:]
+    _is_new = db.peek_user(m.from_user.id) is None
     WAIT_PROMO.discard(m.from_user.id); WAIT_TOPUP.discard(m.from_user.id); db.get_user(m.from_user.id, ref, src); track(m.from_user)
+    if _is_new:
+        asyncio.create_task(extras.notify_new_user(m.from_user.id))
     if command.args and command.args.startswith("gift_"):
         uid = m.from_user.id
         status, days, until = db.use_promo(uid, command.args[5:])
@@ -986,7 +989,9 @@ async def cmd_promos(m: Message):
         tail = "" if not exp else (f", до {dfmt(exp)}" if exp > time.time() else f", истёк {dfmt(exp)}")
         what = (f"+{r['days']} дн." if (r["kind"] or "days") == "days"
                 else f"скидка {r['value']:.0f}%" if r["kind"] == "percent" else f"скидка {r['value']:.0f} ₽")
-        lines.append(f"<code>{r['code']}</code>: {what}, использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") + tail)
+        _s = db.src_get(r["src"]) if r["src"] else None
+        lines.append(f"<code>{r['code']}</code>: {what}, использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") + tail
+                     + (f" · партнёр: {html.escape(_s['title'])}" if _s else ""))
     await send_lines(m, f"<b>Промокоды ({len(rows)})</b>", lines)
 
 @dp.message(Command("stats"), can_stats)
@@ -1155,6 +1160,9 @@ def source_card(code, viewer):
     L += ["", f"Регистраций: {st['regs']}", f"Взяли пробник: {st['trials']}", f"Подписка активна сейчас: {st['active']}",
           f"Оплатили: {st['payers']} чел., оплат {st['pay_n']} на {st['revenue']:.0f} ₽ (конверсия {conv:.0f}%)",
           f"Партнёру начислено: {st['earned']:.0f} ₽"]
+    for pr in db.src_promos(code):
+        L.append(f"Промокод <code>{pr['code']}</code> (+{pr['days']} дн.): активаций {pr['used']}" + (f" из {pr['max_uses']}" if pr["max_uses"] else "")
+                 + f", оплатили {pr['payers']} на {pr['revenue']:.0f} ₽")
     rows = []
     if viewer in config.ADMIN_IDS:
         rows += [[("Название", f"src:ren:{code}"), ("% партнёру", f"src:pct:{code}")],

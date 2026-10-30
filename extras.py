@@ -969,10 +969,135 @@ async def got_xnote(m: Message):
 def start_loops():
     asyncio.create_task(survey_loop())
 
+# ---------- новые люди, именные промокоды партнёров ----------
+def _origin(r):
+    """Откуда пришёл человек: кем приглашён, из какого источника или сам."""
+    if r["ref"]:
+        ru = db.peek_user(r["ref"])
+        return "пригласил " + (B.who(ru) if ru else f"<code>{r['ref']}</code>")
+    if r["src"]:
+        s = db.src_get(r["src"])
+        return "источник «" + esc(s["title"] if s else r["src"]) + "»"
+    return "сам (без ссылки)"
+
+async def notify_new_user(uid):
+    """Короткое сообщение владельцу о новом человеке, если включено: /newnotify on."""
+    try:
+        if db.kv_get("new_notify") != "1": return
+        r = db.peek_user(uid)
+        if not r: return
+        r = (await B.fill_profiles([r]))[0]
+        await tell(config.ADMIN_IDS, f"Новый человек: {B.who(r)} · <code>{uid}</code>\nОткуда: {_origin(r)}")
+    except Exception:
+        logging.exception("notify_new_user")
+
+@router.message(Command("newnotify"), is_owner)
+async def cmd_newnotify(m: Message, command: CommandObject):
+    a = (command.args or "").strip().lower()
+    if a in ("on", "off"):
+        db.kv_set("new_notify", "1" if a == "on" else "0")
+        return await m.answer("Сообщения о новых людях включены." if a == "on" else "Сообщения о новых людях выключены.")
+    await m.answer("Сейчас: " + ("включены" if db.kv_get("new_notify") == "1" else "выключены") + ".\nФормат: /newnotify on или /newnotify off")
+
+@router.message(Command("new"), is_owner)
+async def cmd_new(m: Message, command: CommandObject):
+    a = (command.args or "").strip().lower()
+    since, limit, label = int(time.time()) - 86400, 60, "за сутки"
+    mt = re.fullmatch(r"(\d+)\s*(дн|[чдh])?", a) if a else None
+    if a and not mt:
+        return await m.answer("Формат:\n/new: новые за сутки\n/new 12ч или /new 7д: за период\n/new 30: последние 30 человек")
+    if mt:
+        n, unit = int(mt.group(1)), mt.group(2)
+        if unit in ("ч", "h"): since, label = int(time.time()) - n * 3600, f"за {n} ч"
+        elif unit:             since, label = int(time.time()) - n * 86400, f"за {n} дн."
+        else:                  since, limit, label = 0, min(max(n, 1), 100), f"последние {min(max(n, 1), 100)}"
+    if since: limit = 100
+    rows = db.new_users(since, limit)
+    if not rows: return await m.answer(f"Новых людей {label} нет.")
+    rows = await B.fill_profiles(rows)
+    by = {}
+    for r in rows:
+        k = "приглашены друзьями" if r["ref"] else (("«" + (db.src_get(r["src"])["title"] if db.src_get(r["src"]) else r["src"]) + "»") if r["src"] else "сами")
+        by[k] = by.get(k, 0) + 1
+    head = f"<b>Новые {label}: {len(rows)}</b>\n" + " · ".join(f"{esc(k)}: {v}" for k, v in sorted(by.items(), key=lambda x: -x[1]))
+    lines = [f'{B.tfmt(r["created"], "%d.%m %H:%M")} · {B.who(r)} · <code>{r["id"]}</code>\n    {_origin(r)} · {B.sub_status(r)}' for r in rows]
+    await B.send_lines(m, head, lines, "\n/newnotify on: сообщать о каждом новом сразу", markup=B.card_buttons(rows))
+
+def _find_src(token):
+    """Источник по коду, названию или партнёру (@ник / ID). Возвращает (источник, текст_ошибки)."""
+    s = db.src_get(token)
+    if s: return s, None
+    low = token.lower().lstrip("@")
+    hit = [x for x in db.src_list() if (x["title"] or "").lower() == token.lower()]
+    if len(hit) == 1: return hit[0], None
+    u = B.resolve_user(token)
+    if u:
+        own = db.partner_sources(u["id"])
+        if len(own) == 1: return own[0], None
+        if len(own) > 1: return None, "У этого партнёра несколько ссылок, укажи код нужной: /sources"
+    return None, "Не нашёл такую партнёрскую ссылку. Код, название или партнёр (@ник, ID). Список: /sources"
+
+@router.message(Command("partnerpromo", "pp"), is_owner)
+async def cmd_partnerpromo(m: Message, command: CommandObject):
+    usage = ("Формат: /partnerpromo КОД ДНИ ПАРТНЁР [МАКС_АКТИВАЦИЙ] [ДО_ДАТЫ]\n"
+             "ПАРТНЁР: код ссылки, её название или @ник/ID партнёра (ссылку создать: /sources).\n"
+             "Примеры:\n/partnerpromo IVAN7 7 @ivan\n/partnerpromo IVAN7 7 @ivan 200 31.12.2026\n"
+             "Кто введёт код, засчитается этому партнёру. Статистика: /promostat")
+    a = (command.args or "").split()
+    try:
+        code, days, who_ = a[0].upper(), int(a[1]), a[2]; assert days > 0 and re.fullmatch(r"[A-Z0-9_-]{3,32}", code)
+        uses, exp, name = 0, 0, [a[2]]
+        for t in a[3:]:
+            if B.DATE_RE.match(t):
+                exp = B.end_of_day(t); assert exp and exp > time.time()
+            elif t.isdigit():
+                uses = int(t)
+            else:
+                name.append(t)   # название ссылки из нескольких слов
+        who_ = " ".join(name)
+    except Exception:
+        return await m.answer(usage)
+    s, err = _find_src(who_)
+    if err: return await m.answer(err)
+    old = con.execute("SELECT src FROM promo_codes WHERE code=?", (code,)).fetchone()
+    if old and not old["src"]: return await m.answer("Такой обычный промокод уже есть. Возьми другой код или удали старый: /delpromo.")
+    if old and old["src"] != s["code"]: return await m.answer("Этот код уже привязан к другому партнёру. Возьми другой.")
+    db.create_promo(code, days, uses, exp, src=s["code"])
+    B.alog(m, "partnerpromo", code, f"+{days} дн. · {s['title']}")
+    await m.answer(f"Готово: <code>{code}</code> даёт +{days} дн." + (f", максимум {uses} активаций" if uses else ", без лимита активаций")
+                   + (f", до {B.dfmt(exp)} включительно" if exp else ", без срока")
+                   + f".\nПартнёр: {esc(s['title'])}. Все, кто введёт код, попадут в его статистику (если их никто не приглашал и они не пришли по другой ссылке).\n"
+                   "Смотреть: /promostat")
+
+@router.message(Command("promostat"), is_owner)
+async def cmd_promostat(m: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    srcs = db.src_list()
+    if arg:
+        s, err = _find_src(arg)
+        if err: return await m.answer(err)
+        srcs = [s]
+    L, found = [], 0
+    for s in srcs:
+        prs = db.src_promos(s["code"])
+        if not prs: continue
+        found += 1
+        st = db.src_stats(s["code"])
+        L.append(f"<b>{esc(s['title'])}</b>: пришло {st['regs']}, оплатили {st['payers']}, выручка {rub(st['revenue'])} ₽")
+        for p in prs:
+            exp = f", до {B.dfmt(p['expires'])}" if p["expires"] else ""
+            L.append(f"    <code>{p['code']}</code> +{p['days']} дн.: активаций {p['used']}" + (f" из {p['max_uses']}" if p["max_uses"] else "")
+                     + f", оплатили {p['payers']} на {rub(p['revenue'])} ₽{exp}")
+        L.append("")
+    if not found:
+        return await m.answer("Именных промокодов пока нет. Создай: /partnerpromo КОД ДНИ ПАРТНЁР")
+    await m.answer("\n".join(L).strip(), disable_web_page_preview=True)
+
 # ----- меню команд -----
 OWNER_MENU = [("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
               ("panel", "Панель: онлайн"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
-              ("top", "Топы"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
+              ("top", "Топы"), ("new", "Новые люди и откуда"), ("partnerpromo", "Именной промокод партнёра"),
+              ("promostat", "Статистика промокодов партнёров"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
 SUPPORT_MENU = [("tickets", "Обращения"), ("reply", "Ответить на обращение"), ("devices", "Устройства человека"), ("resetdevices", "Сбросить устройства")]
 
 HELP_OWNER = (
@@ -984,5 +1109,7 @@ HELP_OWNER = (
     "\n<b>Поддержка</b>\n/tickets: открытые обращения\n/reply НОМЕР текст · /close НОМЕР · /ticketstats\n/surveystats: почему не продлевают\n"
     "\n<b>VPN и панель</b>\n/panel: онлайн и пользователи\n/nodes: состояние нод\n/sub ID: ссылка человека\n/revoke ID да: перевыпустить ссылку\n"
     "/devices ID · /resetdevices ID · /devlimit ID N · /resettraffic ID\n"
+    "\n<b>Новые люди и партнёры</b>\n/new [12ч|7д|30]: кто пришёл и откуда (приглашён, источник или сам)\n/newnotify on|off: сообщать о каждом новом сразу\n"
+    "/partnerpromo КОД ДНИ ПАРТНЁР [МАКС] [ДАТА]: именной промокод партнёра\n/promostat [ПАРТНЁР]: сколько пришло и заплатило по его кодам\n"
     "\n<b>Бот</b>\n/maintenance on|off [текст]: режим техработ\n/funnel: воронка\n/top: топ приглашающих и платящих\n/export: пользователи в CSV")
 HELP_SUPPORT = "\n/tickets: открытые обращения\n/reply НОМЕР текст: ответить\n/close НОМЕР: закрыть\n/devices ID · /resetdevices ID\n/note ID [текст]: заметка\n/msg ID текст: сообщение человеку"

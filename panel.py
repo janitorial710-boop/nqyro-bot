@@ -32,14 +32,27 @@ async def _call(method: str, path: str, **kw):
                 data = data["response"]
             return r.status, data
 
+def _is_outage(st: int) -> bool:
+    """Ответ панели, по которому нельзя судить, есть ли пользователь (сбой, перегрузка, нет доступа)."""
+    return st >= 500 or st in (401, 403, 408, 429)
+
 async def _find(uid: int):
-    """Ищет пользователя по Telegram ID, затем по username. None, если нет."""
-    st, data = await _call("GET", f"/api/users/by-telegram-id/{uid}")
-    if st == 200 and data:
-        return data[0] if isinstance(data, list) else data
+    """Ищет пользователя: сначала по имени tg_<id>, затем по Telegram ID. None, если его точно нет.
+    Если панель ответила ошибкой, бросает исключение: иначе бот решит, что человека нет, и попробует создать дубликат."""
     st, data = await _call("GET", f"/api/users/by-username/tg_{uid}")
     if st == 200 and data:
-        return data
+        return data[0] if isinstance(data, list) else data
+    if _is_outage(st):
+        raise RuntimeError(f"panel find by username HTTP {st}")
+    st, data = await _call("GET", f"/api/users/by-telegram-id/{uid}")
+    if st == 200 and data:
+        lst = data if isinstance(data, list) else [data]
+        # с одним Telegram ID в панели может оказаться несколько записей (заведены вручную при тестах):
+        # берём свою tg_<id>, затем активную, затем с самым поздним сроком
+        lst.sort(key=lambda x: (x.get("username") == f"tg_{uid}", x.get("status") == "ACTIVE", x.get("expireAt") or ""), reverse=True)
+        return lst[0]
+    if _is_outage(st):
+        raise RuntimeError(f"panel find by telegram id HTTP {st}")
     return None
 
 async def _create(uid: int, until_ts: int):
@@ -77,8 +90,16 @@ async def _sync(uid: int, until_ts: int):
         return data
     return u
 
-async def ensure_user(uid: int) -> str:
-    """Возвращает реальную ссылку-подписку из панели (создаёт пользователя при необходимости)."""
+def _fallback_link(uid: int):
+    """Запасная ссылка только если SUB_BASE настроен по-настоящему. Значение по умолчанию (example.com) нерабочее."""
+    base = (config.SUB_BASE or "").rstrip("/")
+    if not base or "example.com" in base:
+        return None
+    return f"{base}/{uid}"
+
+async def ensure_user(uid: int):
+    """Возвращает реальную ссылку-подписку из панели (создаёт пользователя при необходимости).
+    None, если получить ссылку не удалось: бот тогда честно попросит повторить, а не выдаст нерабочую ссылку."""
     until = db.get_user(uid)["sub_until"]
     try:
         u = await _sync(uid, until)
@@ -86,7 +107,14 @@ async def ensure_user(uid: int) -> str:
             return u["subscriptionUrl"]
     except Exception:
         logging.exception("panel ensure_user failed")
-    return f"{config.SUB_BASE}/{uid}"   # запасной вариант, если панель недоступна
+    # синхронизация не удалась, но человек мог уже быть в панели: тогда отдаём его настоящую ссылку как есть
+    try:
+        u = await _find(uid)
+        if u and u.get("subscriptionUrl"):
+            return u["subscriptionUrl"]
+    except Exception:
+        logging.exception("panel ensure_user: повторный поиск тоже не удался")
+    return _fallback_link(uid)
 
 async def set_expiry(uid: int, until_ts: int) -> None:
     try:
@@ -191,23 +219,13 @@ async def sync_many(items, pause: float = 0.15):
     return ok, bad
 
 
-_freed = {}   # uuid человека -> когда последний раз освобождали слот (защита от повторных обновлений страницы)
+_freed = {}   # uuid человека -> когда последний раз освобождали слот (защита от бесконечных повторов)
+FREE_PAUSE = 30   # секунд
 
-async def free_device_slot_by_sub(sub: str) -> int:
-    """Вызывается, когда человек нажимает «Добавить в Happ/Incy». Если лимит устройств исчерпан (чаще всего из-за старой записи
-    от удалённой подписки), отвязывает самые давние устройства, чтобы осталось место под новое. Возвращает, сколько отвязано.
-    Владельца определяем по самой ссылке-подписке (она секретная), так что чужие устройства по чужому ID не тронуть."""
-    if not config.PANEL_URL or not config.PANEL_TOKEN:
-        return 0
-    short = urlparse(sub).path.rstrip("/").rsplit("/", 1)[-1]
-    if not short:
-        return 0
-    st, u = await _call("GET", f"/api/users/by-short-uuid/{short}")
-    if isinstance(u, list): u = u[0] if u else None
-    if st != 200 or not u or (u.get("subscriptionUrl") or "").rstrip("/") != sub.rstrip("/"):
-        return 0
+async def _free_slots(u) -> int:
+    """Если лимит устройств исчерпан, отвязывает самые давние, чтобы осталось место под новое. Возвращает, сколько отвязано."""
     limit = u.get("hwidDeviceLimit") or config.HWID_LIMIT
-    if limit <= 0 or time.time() - _freed.get(u["uuid"], 0) < 600:
+    if limit <= 0 or time.time() - _freed.get(u["uuid"], 0) < FREE_PAUSE:
         return 0
     data = await _ok("GET", f"/api/hwid/devices/{u['uuid']}")
     devs = (data.get("devices") if isinstance(data, dict) else data) or []
@@ -222,3 +240,43 @@ async def free_device_slot_by_sub(sub: str) -> int:
     _freed[u["uuid"]] = time.time()
     logging.info("freed %s device slot(s) for %s", n, u.get("username"))
     return n
+
+async def free_device_slot(uid: int) -> int:
+    """Вызывается ботом, когда человек открывает «Подключиться»: к моменту нажатия «Добавить в Happ/Incy» место под устройство уже есть."""
+    if not config.PANEL_URL or not config.PANEL_TOKEN:
+        return 0
+    u = await _find(uid)
+    return await _free_slots(u) if u else 0
+
+async def free_device_slot_by_sub(sub: str) -> int:
+    """Вариант для страницы-редиректа бота (redirect.py): владельца определяем по самой ссылке-подписке (она секретная)."""
+    if not config.PANEL_URL or not config.PANEL_TOKEN:
+        return 0
+    short = urlparse(sub).path.rstrip("/").rsplit("/", 1)[-1]
+    if not short:
+        return 0
+    st, u = await _call("GET", f"/api/users/by-short-uuid/{short}")
+    if isinstance(u, list): u = u[0] if u else None
+    if st != 200 or not u or (u.get("subscriptionUrl") or "").rstrip("/") != sub.rstrip("/"):
+        return 0
+    return await _free_slots(u)
+
+async def diagnose(uid: int) -> dict:
+    """Всё, что нужно, чтобы понять, почему человек не подключается (для /diag). Ничего не меняет."""
+    out = {"matches": [], "devices": None, "devices_err": None}
+    st, data = await _call("GET", f"/api/users/by-telegram-id/{uid}")
+    if st == 200 and data:
+        out["matches"] = data if isinstance(data, list) else [data]
+    out["by_telegram_status"] = st
+    st2, d2 = await _call("GET", f"/api/users/by-username/tg_{uid}")
+    out["by_username_status"] = st2
+    out["by_username"] = d2 if st2 == 200 and isinstance(d2, dict) else None
+    u = out["by_username"] or (out["matches"][0] if out["matches"] else None)
+    out["picked"] = u
+    if u:
+        try:
+            data = await _ok("GET", f"/api/hwid/devices/{u['uuid']}")
+            out["devices"] = (data.get("devices") if isinstance(data, dict) else data) or []
+        except Exception as e:
+            out["devices_err"] = str(e)
+    return out

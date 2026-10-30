@@ -57,9 +57,9 @@ CREATE TABLE IF NOT EXISTS auto_sent(
   user_id INTEGER, kind TEXT, ts INTEGER, PRIMARY KEY(user_id, kind));
 """)
 
-def create_promo(code, days, max_uses=0, expires=0, kind="days", value=0):
-    con.execute("INSERT OR REPLACE INTO promo_codes(code,days,max_uses,used,created,expires,kind,value) VALUES(?,?,?,COALESCE((SELECT used FROM promo_codes WHERE code=?),0),?,?,?,?)",
-                (code.upper(), days, max_uses, code.upper(), int(time.time()), expires, kind, value)); con.commit()
+def create_promo(code, days, max_uses=0, expires=0, kind="days", value=0, src=None):
+    con.execute("INSERT OR REPLACE INTO promo_codes(code,days,max_uses,used,created,expires,kind,value,src) VALUES(?,?,?,COALESCE((SELECT used FROM promo_codes WHERE code=?),0),?,?,?,?,?)",
+                (code.upper(), days, max_uses, code.upper(), int(time.time()), expires, kind, value, src)); con.commit()
 
 # ---------- скидки ----------
 con.executescript("""
@@ -170,6 +170,9 @@ def use_promo(uid, code):
     except sqlite3.IntegrityError:
         return ("already", 0, 0)
     con.execute("UPDATE promo_codes SET used=used+1 WHERE code=?", (code,)); con.commit()
+    if p["src"] and src_get(p["src"]):   # именной код партнёра: первое касание, если человека никто не приглашал и источника у него нет
+        get_user(uid)
+        con.execute("UPDATE users SET src=? WHERE id=? AND COALESCE(src,'')='' AND ref IS NULL", (p["src"], uid)); con.commit()
     if (p["kind"] or "days") != "days":
         get_user(uid)
         con.execute("UPDATE users SET disc_kind=?, disc_value=?, disc_code=? WHERE id=?", (p["kind"], p["value"], code, uid)); con.commit()
@@ -182,7 +185,8 @@ CREATE TABLE IF NOT EXISTS sources(code TEXT PRIMARY KEY, title TEXT, percent RE
 """)
 for _sql in ("ALTER TABLE users ADD COLUMN src TEXT",              # код источника, откуда человек пришёл (первое касание)
              "ALTER TABLE payments ADD COLUMN ref_to INTEGER",     # кому начислен бонус за эту оплату
-             "ALTER TABLE payments ADD COLUMN ref_bonus REAL"):    # сколько начислено (хранится, чтобы возврат откатил ровно это)
+             "ALTER TABLE payments ADD COLUMN ref_bonus REAL",     # сколько начислено (хранится, чтобы возврат откатил ровно это)
+             "ALTER TABLE promo_codes ADD COLUMN src TEXT"):       # код источника (партнёра), к которому привязан именной промокод
     try:
         con.execute(_sql); con.commit()
     except sqlite3.OperationalError:
@@ -209,7 +213,24 @@ def src_update(code, **fields):
     con.commit()
 
 def src_delete(code):
-    con.execute("DELETE FROM sources WHERE code=?", (code,)); con.commit()
+    con.execute("DELETE FROM sources WHERE code=?", (code,))
+    con.execute("UPDATE promo_codes SET src=NULL WHERE src=?", (code,)); con.commit()
+
+def src_promos(code):
+    """Именные промокоды источника: активаций, сколько из активировавших заплатили и на какую сумму."""
+    out = []
+    for r in con.execute("SELECT * FROM promo_codes WHERE src=? ORDER BY created DESC", (code,)).fetchall():
+        pay = con.execute("SELECT COUNT(DISTINCT p.user_id), COALESCE(SUM(p.amount),0) FROM payments p JOIN promo_uses pu ON pu.user_id=p.user_id "
+                          "WHERE pu.code=? AND p.status='paid' AND p.method!='balance' AND p.plan!='topup'", (r["code"],)).fetchone()
+        out.append({"code": r["code"], "days": r["days"], "max_uses": r["max_uses"], "used": r["used"], "expires": r["expires"] or 0,
+                    "payers": pay[0], "revenue": pay[1]})
+    return out
+
+def new_users(since=0, limit=30):
+    """Новые люди: за период (since — unix-время) или просто последние limit."""
+    if since:
+        return con.execute("SELECT * FROM users WHERE created>=? ORDER BY created DESC LIMIT ?", (since, limit)).fetchall()
+    return con.execute("SELECT * FROM users ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
 
 def src_stats(code, now=None):
     now = now or int(time.time())

@@ -169,7 +169,8 @@ def partner(u):
         st = db.src_stats(s["code"])
         L.append(f"<b>{html.escape(s['title'])}</b> · {s['percent']:.0f}% с каждой оплаты\n"
                  f"Регистраций: {st['regs']} · оплатили: {st['payers']} · начислено: {st['earned']:.0f} ₽\n"
-                 f"<code>https://t.me/{config.BOT_USERNAME}?start=src_{s['code']}</code>\n")
+                 f"<code>https://t.me/{config.BOT_USERNAME}?start=src_{s['code']}</code>\n"
+                 + "".join(f"Промокод <code>{p['code']}</code>: активаций {p['used']}, оплатили {p['payers']}\n" for p in db.src_promos(s["code"])))
     L.append(f"На балансе: {db.total_balance(u):.0f} ₽. Им можно оплатить подписку. Вывод на карту: через поддержку.")
     return ("08_friends.png", "\n".join(L), kb([("Поддержка", "go:support")], [("Назад", "go:profile")]))
 
