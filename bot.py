@@ -74,7 +74,14 @@ async def screen_for(key, uid):
         WAIT_TOPUP.add(uid); return screens.topup(u)
     if key == "convert": return screens.convert(u)
     if key == "connect":
-        sub = await panel.ensure_user(uid) if u["sub_until"] > time.time() else None
+        if u["sub_until"] <= time.time():
+            return screens.connect(u, None)
+        sub = await panel.ensure_user(uid)
+        if not sub:
+            return screens.connect_error(u)
+        if config.AUTO_FREE_DEVICE:   # лимит устройств не должен мешать повторному добавлению
+            try: await asyncio.wait_for(panel.free_device_slot(uid), 8)
+            except Exception: logging.exception("free device slot failed")
         return screens.connect(u, sub)
     return screens.start(u)
 
@@ -189,7 +196,7 @@ async def finalize_if_paid(pid, quiet=False):
         st = await payments.status(p["yk_id"])
     except Exception:
         logging.exception("status check failed")
-        await alert_once("yk_status", "🔴 ЮKassa не отвечает на проверку платежа (см. логи). Оплаты могут зависнуть, пока связь не восстановится.")
+        await alert_once("yk_status", "ЮKassa не отвечает на проверку платежа (см. логи). Оплаты могут зависнуть, пока связь не восстановится.")
         return False
     if st == "succeeded":
         await deliver_paid(pid)
@@ -236,7 +243,7 @@ async def start_payment(target, uid, plan, method, gift=False, amount=None):
         pid, url = await payments.create_invoice(uid, plan, method, u["email"], gift, amount)
     except Exception:
         logging.exception("invoice failed"); await show(target, screens.error(u))
-        await alert_once("yk_invoice", "🔴 Не удалось создать счёт в ЮKassa (см. логи). Проверь YK_SHOP_ID, YK_SECRET и баланс магазина.")
+        await alert_once("yk_invoice", "Не удалось создать счёт в ЮKassa (см. логи). Проверь YK_SHOP_ID, YK_SECRET и баланс магазина.")
         return
     if url is None:
         await show(target, screens.pay_dev(u, pid))
@@ -374,10 +381,10 @@ def _paid_ids():
     return {r[0] for r in db.con.execute("SELECT DISTINCT user_id FROM payments WHERE status='paid' AND COALESCE(gift,0)=0 AND plan!='topup'")}
 
 def sub_label(u, paid):
-    """💎 платная · 🆓 пробник · 🎁 дни выданы/подарены/по коду. Только для активной подписки."""
+    """платная · пробник · выдана (дни выданы/подарены/по коду). Только для активной подписки."""
     if (u["sub_until"] or 0) <= time.time(): return ""
-    if u["id"] in paid: return "💎 "
-    return "🆓 " if u["trial_used"] else "🎁 "
+    if u["id"] in paid: return "платная · "
+    return "пробник · " if u["trial_used"] else "выдана · "
 
 def who(u):
     name = html.escape(u["name"] or "") or "без имени"
@@ -408,7 +415,7 @@ def card_buttons(rows, limit=90):   # 100 кнопок на сообщение: 
     btns = []
     for u in rows[:limit]:
         label = ((u["name"] or "").strip() if (u["name"] or "").strip() not in ("", "?") else ("@" + u["username"] if u["username"] else str(u["id"])))[:18]
-        btns.append((f"👤 {label}", f"adm:open:{u['id']}"))
+        btns.append((label, f"adm:open:{u['id']}"))
     return screens.kb(*[btns[i:i + 2] for i in range(0, len(btns), 2)]) if btns else None
 
 def resolve_user(arg):
@@ -655,7 +662,7 @@ REFUND_BAD = {"not_found": "Платёж не найден.", "not_paid": "Эт�
               "gift_used": "Подарок уже активирован другом, вернуть его нельзя.",
               "topup_spent": "Человек уже потратил часть этого пополнения, на балансе не хватает денег. Сначала спиши лишнее вручную (кнопка «Баланс ±» в карточке) или верни деньги через кабинет ЮKassa."}
 REFUNDING = set()   # платежи, по которым возврат идёт прямо сейчас (защита от двойного нажатия)
-REFUND_CONFIRM = lambda pid: screens.kb([("✅ Подтвердить возврат", f"rfy:{pid}")], [("Отмена", "rfn")])
+REFUND_CONFIRM = lambda pid: screens.kb([("Подтвердить возврат", f"rfy:{pid}")], [("Отмена", "rfn")])
 
 def _refund_effects(p, info):
     effects = [("деньги вернутся на основной баланс человека" if p["method"] == "balance" else
@@ -721,7 +728,7 @@ async def cmd_refund(m: Message, command: CommandObject):
     a = (command.args or "").split()
     try: pid = int(a[0])
     except Exception:
-        return await m.answer("Возврат делается кнопкой «↩️ Возврат» в карточке человека (/user) и в списке оплат (/payments).\nЕсли знаешь номер платежа: /refund НОМЕР.")
+        return await m.answer("Возврат делается кнопкой «Возврат» в карточке человека (/user) и в списке оплат (/payments).\nЕсли знаешь номер платежа: /refund НОМЕР.")
     if "да" in [x.lower() for x in a[1:]]:
         return await m.answer(await refund_run(pid, m), disable_web_page_preview=True)
     p, text = refund_preview(pid)
@@ -896,19 +903,19 @@ async def cmd_buylog(m: Message, command: CommandObject):
         t = _ago(r["created"]); who_ = _bl_name(r["user_id"]); amt = r["amount"] or 0
         how = "с баланса" if r["method"] == "balance" else (r["method"] or "")
         plan = r["plan"]; lab = config.PLANS[plan][2] if plan in config.PLANS else plan
-        back = " · ↩️ возврат" if r["status"] == "refunded" else ""
+        back = " · возврат" if r["status"] == "refunded" else ""
         if r["gift"]:
             gifts += 1
             to = (f"→ {_bl_name(r['rcv'])}" if r["rcv"] else f"→ пока никому (код <code>{html.escape(r['code'] or '?')}</code>)")
-            lines.append(f"🎁 {t} · {who_} {to}\n   {lab} · {amt:.0f} ₽ · {how}{back}")
+            lines.append(f"Подарок · {t} · {who_} {to}\n   {lab} · {amt:.0f} ₽ · {how}{back}")
         elif plan == "topup":
             bn = f" (+{r['bonus']:.0f} бонус)" if r["bonus"] else ""
-            lines.append(f"💳 {t} · {who_} пополнил баланс на {amt:.0f} ₽{bn} · {how}{back}")
+            lines.append(f"Пополнение · {t} · {who_} пополнил баланс на {amt:.0f} ₽{bn} · {how}{back}")
         elif plan == "days":
-            lines.append(f"⏳ {t} · {who_} обменял {amt:.0f} ₽ баланса на {(r['secs'] or 0) / 86400:.1f} дн.{back}")
+            lines.append(f"Обмен · {t} · {who_} обменял {amt:.0f} ₽ баланса на {(r['secs'] or 0) / 86400:.1f} дн.{back}")
         else:
             buys += 1
-            lines.append(f"🛒 {t} · {who_} купил «{lab}» · {amt:.0f} ₽ · {how}{back}")
+            lines.append(f"Покупка · {t} · {who_} купил «{lab}» · {amt:.0f} ₽ · {how}{back}")
     head = f"<b>Журнал покупок и подарков</b>" + (f" · {_bl_name(target['id'])}" if target else "") + f"\nПоследние {len(rows)}: покупок {buys}, подарков {gifts}"
     await send_lines(m, head, lines, "\n/buylog 100: больше · /buylog @ник: по человеку")
 
@@ -1010,7 +1017,7 @@ async def cmd_users(m: Message, command: CommandObject):
         return await m.answer(f"Пользователей: {total}. На странице {page} пусто.")
     rows = await fill_profiles(rows)
     paid = _paid_ids()
-    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_label(u, paid)}{sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_label(u, paid)}{sub_status(u)}' + (" · бан" if u["banned"] else "") for u in rows]
     pages = (total + size - 1) // size
     tail = f"\nСтраница {page} из {pages}." + (f" Дальше: /users {page + 1}" if page < pages else "")
     await send_lines(m, f"<b>Пользователи ({total})</b>", lines, tail)
@@ -1024,8 +1031,8 @@ async def cmd_subs(m: Message):
     rows = await fill_profiles(rows)
     paid = _paid_ids()
     kinds = [sub_label(u, paid) for u in rows]
-    lines = [f'{who(u)} · <code>{u["id"]}</code> · {k}{sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u, k in zip(rows, kinds)]
-    head = f"<b>С активной подпиской: {len(rows)}</b>\n💎 платных: {kinds.count('💎 ')} · 🆓 пробник: {kinds.count('🆓 ')} · 🎁 выдано/подарок: {kinds.count('🎁 ')}"
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {k}{sub_status(u)}' + (" · бан" if u["banned"] else "") for u, k in zip(rows, kinds)]
+    head = f"<b>С активной подпиской: {len(rows)}</b>\nплатных: {kinds.count('платная · ')} · пробник: {kinds.count('пробник · ')} · выдано/подарок: {kinds.count('выдана · ')}"
     await send_lines(m, head, lines)
 
 @dp.message(Command("find"), can_support)
@@ -1038,7 +1045,7 @@ async def cmd_find(m: Message, command: CommandObject):
     note = f"\nУ {unknown} чел. имя ещё не известно, они найдутся по ID или после /users." if unknown else ""
     if not rows:
         return await m.answer("Никого не нашёл." + note)
-    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · ⛔ бан" if u["banned"] else "") for u in rows]
+    lines = [f'{who(u)} · <code>{u["id"]}</code> · {sub_status(u)}' + (" · бан" if u["banned"] else "") for u in rows]
     await send_lines(m, f"<b>Найдено: {len(rows)}</b>", lines, note, card_buttons(rows))
 
 NOT_FOUND_CARD = "Пользователь не найден."
@@ -1053,7 +1060,7 @@ async def build_card(uid, viewer):
     n_fr, earned, _ = db.friends_stats(uid)
     pay_n, pay_sum = db.user_pay_totals(uid)
     L = [f'{who(u)}', f'ID: <code>{uid}</code>', f'Подписка: {sub_status(u)}']
-    if u["banned"]: L.append("⛔ Заблокирован")
+    if u["banned"]: L.append("Заблокирован")
     L.append(f'Пробник: {"использован" if u["trial_used"] else "не брал"}')
     L.append(f'Регистрация: {tfmt(u["created"])}' if u["created"] else "Регистрация: неизвестно")
     if u["src"]:
@@ -1089,13 +1096,13 @@ async def build_card(uid, viewer):
     owner = viewer in config.ADMIN_IDS
     rows = [[(f"+{d} дн.", f"adm:give:{uid}:{d}") for d in (7, 30) if owner or d <= config.SUPPORT_GIVE_MAX] + [("Свои дни", f"adm:days:{uid}")]]
     if owner:
-        rows.append([("✅ Разблокировать" if u["banned"] else "⛔ Заблокировать", f"adm:{'unban' if u['banned'] else 'ban'}:{uid}"),
-                     ("💰 Баланс ±", f"adm:bal:{uid}")])
-    rows.append([("✉️ Написать", f"adm:msg:{uid}"), ("🔄 Обновить", f"adm:card:{uid}")])
+        rows.append([("Разблокировать" if u["banned"] else "Заблокировать", f"adm:{'unban' if u['banned'] else 'ban'}:{uid}"),
+                     ("Баланс ±", f"adm:bal:{uid}")])
+    rows.append([("Написать", f"adm:msg:{uid}"), ("Обновить", f"adm:card:{uid}")])
     if owner:
         rows += extras.card_rows(uid)
         for p in pays[:3]:
-            rows.append([(f"↩️ Возврат #{p['id']} · {p['amount']} ₽ · {tfmt(p['created'], '%d.%m')}", f"rf:{p['id']}")])
+            rows.append([(f"Возврат #{p['id']} · {p['amount']} ₽ · {tfmt(p['created'], '%d.%m')}", f"rf:{p['id']}")])
     return "\n".join(L), screens.kb(*rows)
 
 @dp.message(Command("user"), can_support)
@@ -1131,7 +1138,7 @@ def src_list_screen(viewer):
         "Пока нет ни одной ссылки. Создай ссылку для блогера или рекламы, и бот покажет регистрации, оплаты и выручку по каждой.")
     btns = [(s["title"][:18], f"src:open:{s['code']}") for s in rows[:20]]
     kbrows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    if viewer in config.ADMIN_IDS: kbrows.append([("➕ Новая ссылка", "src:new")])
+    if viewer in config.ADMIN_IDS: kbrows.append([("Новая ссылка", "src:new")])
     return text, (screens.kb(*kbrows) if kbrows else None)
 
 def source_card(code, viewer):
@@ -1150,9 +1157,9 @@ def source_card(code, viewer):
           f"Партнёру начислено: {st['earned']:.0f} ₽"]
     rows = []
     if viewer in config.ADMIN_IDS:
-        rows += [[("✏️ Название", f"src:ren:{code}"), ("% партнёру", f"src:pct:{code}")],
-                 [("👤 Партнёр", f"src:own:{code}"), ("🗑 Удалить", f"src:del:{code}")]]
-    rows.append([("← К списку", "src:list")])
+        rows += [[("Название", f"src:ren:{code}"), ("% партнёру", f"src:pct:{code}")],
+                 [("Партнёр", f"src:own:{code}"), ("Удалить", f"src:del:{code}")]]
+    rows.append([("Назад", "src:list")])
     return "\n".join(L), screens.kb(*rows)
 
 SRC_PROMPTS = {"ren": "Пришли новое название ссылки. Отмена: «отмена».",
@@ -1196,7 +1203,7 @@ async def cb_src(c: CallbackQuery):
         s = db.src_get(code)
         if not s: return await c.answer("Ссылка не найдена", show_alert=True)
         await _edit_or_send(c, f"Удалить ссылку «{html.escape(s['title'])}»?\nЛюди, которые пришли по ней, останутся, но статистика по ссылке пропадёт, а партнёру перестанут начисляться деньги.",
-                            screens.kb([("Да, удалить", f"src:delok:{code}")], [("Отмена", f"src:open:{code}")]))
+                            screens.kb([("Да, удалить", f"src:delok:{code}"), ("Отмена", f"src:open:{code}")]))
     elif act == "delok":
         db.src_delete(code); alog(c, "src_delete", code)
         text, mk = src_list_screen(me); await _edit_or_send(c, text, mk)
@@ -1206,7 +1213,7 @@ async def _notify_partner(owner_id, code):
     s = db.src_get(code)
     if not (s and owner_id and s["percent"]): return
     try:
-        await bot.send_message(owner_id, f"🤝 Тебе открыта партнёрская ссылка «{html.escape(s['title'])}»: {s['percent']:.0f}% с каждой оплаты пришедших по ней людей.\n\n"
+        await bot.send_message(owner_id, f"Тебе открыта партнёрская ссылка «{html.escape(s['title'])}»: {s['percent']:.0f}% с каждой оплаты пришедших по ней людей.\n\n"
                                          f"<code>{src_link(code)}</code>\n\nСтатистика: Профиль → Партнёрка (или /partner).")
     except Exception:
         logging.warning("партнёру %s не отправилось уведомление", owner_id)
@@ -1249,7 +1256,7 @@ async def got_src_wiz(m: Message):
         await finish(code)
         s = db.src_get(code)
         if pct and not s["owner_id"]:
-            await m.answer("Партнёр не задан: нажми «👤 Партнёр», иначе деньги начисляться не будут.")
+            await m.answer("Партнёр не задан: нажми «Партнёр», иначе деньги начисляться не будут.")
         return
     if step in ("owner", "editown"):
         if txt in ("0", "нет") and step == "editown":
@@ -1296,7 +1303,7 @@ async def do_ban(actor, uid, flag):
     except Exception:
         logging.exception("panel ban failed")
         tail = " В панели не получилось: проверь вручную."
-    return ("⛔ Заблокирован." if flag else "✅ Разблокирован.") + tail
+    return ("Заблокирован." if flag else "Разблокирован.") + tail
 
 ADM_PROMPTS = {"days": "Сколько дней выдать? Пришли число (например 14). Отмена: напиши «отмена».",
                "bal": "На сколько изменить основной баланс? Пришли сумму в рублях: 500 пополнит, -200 спишет. Отмена: напиши «отмена».",
@@ -1348,7 +1355,7 @@ async def got_adm_photo(m: Message):
         return await m.answer("Нет доступа.")
     cap = (m.caption or "").strip()
     try:
-        await bot.send_photo(tid, m.photo[-1].file_id, caption=("💬 Сообщение от поддержки:\n\n" + cap) if cap else "💬 Сообщение от поддержки", parse_mode=None)
+        await bot.send_photo(tid, m.photo[-1].file_id, caption=("Сообщение от поддержки:\n\n" + cap) if cap else "Сообщение от поддержки", parse_mode=None)
         alog(m, "msg", tid, "[фото] " + cap[:80]); res = "Отправлено с фото."
     except Exception:
         res = "Не доставилось (возможно, человек заблокировал бота)."
@@ -1384,7 +1391,7 @@ async def got_adm_input(m: Message):
         res = f"Готово. Основной баланс: {u['topup']:.0f} ₽, реферальный: {u['balance']:.0f} ₽."
     else:
         try:
-            await bot.send_message(tid, "💬 Сообщение от поддержки:\n\n" + txt, parse_mode=None)
+            await bot.send_message(tid, "Сообщение от поддержки:\n\n" + txt, parse_mode=None)
             alog(m, "msg", tid, txt[:80]); res = "Отправлено."
         except Exception:
             res = "Не доставилось (возможно, человек заблокировал бота)."
@@ -1437,7 +1444,7 @@ async def _ban(m: Message, command: CommandObject, flag: bool):
     except Exception:
         logging.exception("panel ban failed")
         tail = " В панели не получилось: проверь вручную."
-    await m.answer(("⛔ Заблокирован: " if flag else "✅ Разблокирован: ") + f'{who(u)} · <code>{u["id"]}</code>.' + tail, disable_web_page_preview=True)
+    await m.answer(("Заблокирован: " if flag else "Разблокирован: ") + f'{who(u)} · <code>{u["id"]}</code>.' + tail, disable_web_page_preview=True)
 
 @dp.message(Command("ban"), is_admin)
 async def cmd_ban(m: Message, command: CommandObject): await _ban(m, command, True)
@@ -1459,7 +1466,7 @@ async def cmd_payments(m: Message, command: CommandObject):
         lines.append(f'{tfmt(r["created"], "%d.%m %H:%M")} · {r["amount"]} ₽ · {plan} · {how}\n   {who(r)} · ID <code>{r["id"]}</code> · платёж #{r["pid"]}')
     markup = None
     if m.from_user.id in config.ADMIN_IDS:
-        btns = [(f"↩️ #{r['pid']} · {r['amount']} ₽", f"rf:{r['pid']}") for r in rows[:10]]
+        btns = [(f"Возврат #{r['pid']} · {r['amount']} ₽", f"rf:{r['pid']}") for r in rows[:10]]
         markup = screens.kb(*[btns[i:i + 2] for i in range(0, len(btns), 2)])
     await send_lines(m, f"<b>Последние оплаты ({len(rows)})</b>", lines, markup=markup)
 
@@ -1512,7 +1519,7 @@ async def cmd_broadcast(m: Message, command: CommandObject):
         return await m.answer("Ошибка в оформлении текста: " + html.escape(str(e)) + "\nПроверь HTML-теги или убери их.")
     BCAST[m.from_user.id] = (seg, text, photo)
     n = len(db.segment_ids(seg))
-    await m.answer(f"☝️ Предпросмотр. Получат {SEGMENTS[seg]}: {n} чел.\n\nОтправить сейчас: /broadcastok\nЗапланировать: /broadcastat ДД.ММ ЧЧ:ММ\nОтменить: /broadcastcancel")
+    await m.answer(f"Предпросмотр. Получат {SEGMENTS[seg]}: {n} чел.\n\nОтправить сейчас: /broadcastok\nЗапланировать: /broadcastat ДД.ММ ЧЧ:ММ\nОтменить: /broadcastcancel")
 
 @dp.message(Command("broadcastcancel"), is_admin)
 async def cmd_broadcastcancel(m: Message):
@@ -1574,7 +1581,7 @@ ADMIN_HELP = (
     "/sale 20% ДД.ММ.ГГГГ ДД.ММ.ГГГГ [название]: акция на все тарифы\n/sales: список акций\n/delsale НОМЕР\n\n"
     "<b>Деньги</b>\n/takeref ID СУММА|всё: списать реферальный баланс у человека\n/takeallref: забрать реферальные деньги у всех (выданное мной или весь баланс)\n/buylog [N] [ID]: кто кому что дарил и покупал\n/mybal СУММА | ref СУММА | set СУММА | reset: крутить свой баланс\n"
     "/profit [дни]: выручка, расходы, прибыль\n/cost СУММА КАТЕГОРИЯ [заметка]: записать расход\n/costs: расходы\n/delcost НОМЕР\n"
-    "/forecast: сколько может прийти на продлениях за неделю\nВозврат: кнопка «↩️» в /user и /payments (или /refund НОМЕР)\n\n"
+    "/forecast: сколько может прийти на продлениях за неделю\nВозврат: кнопка «Возврат» в /user и /payments (или /refund НОМЕР)\n\n"
     "<b>Рассылка</b>\n"
     "/broadcast [all|active|expired|never] ТЕКСТ: предпросмотр (с фото: фото с подписью /broadcast ...)\n/broadcastok: отправить\n/broadcastcancel: отменить\n\n"
     "<b>Контроль</b>\n"
@@ -1620,9 +1627,9 @@ async def build_report():
         for n in nodes:
             ok = n.get("isDisabled") or n.get("isConnected")
             state = "отключена вручную" if n.get("isDisabled") else ("в сети" if n.get("isConnected") else "НЕ В СЕТИ")
-            text += f"{'✅' if ok else '🔴'} {html.escape(str(n.get('name') or n.get('address') or '?'))}: {state}\n"
+            text += f"{'Работает' if ok else 'Не работает'}: {html.escape(str(n.get('name') or n.get('address') or '?'))}: {state}\n"
     except Exception as e:
-        text += f"🔴 Панель не отвечает: {html.escape(str(e))}"
+        text += f"Панель не отвечает: {html.escape(str(e))}"
     return text
 
 async def send_backup(path):

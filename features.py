@@ -88,7 +88,7 @@ def ar_screen(u):
               "Отключить можно в любой момент здесь же."]
     if not card:
         L += ["", "Чтобы привязать карту: включи автопродление и оплати подписку банковской картой. Карта сохранится у платёжного сервиса, мы её номер не видим."]
-    rows = [[("🔕 Выключить" if on else "🔁 Включить", "ar:off" if on else "ar:on")]]
+    rows = [[("Выключить" if on else "Включить", "ar:off" if on else "ar:on")]]
     if card: rows.append([("Отвязать карту", "ar:unlink")])
     rows.append([("Назад", "go:profile")])
     return ("07_profile.png", "\n".join(L), kb(*rows))
@@ -214,7 +214,7 @@ async def alt_payment(c, plan, method, gift=False, amount=None):
             await B.show(c, screens.pay_link(u, url, pid))
     except Exception:
         logging.exception("alt payment failed")
-        await B.alert_once("alt_pay", f"🔴 Не удалось создать счёт ({method}), см. логи. Проверь настройки оплаты.")
+        await B.alert_once("alt_pay", f"Не удалось создать счёт ({method}), см. логи. Проверь настройки оплаты.")
         await B.show(c, screens.error(u))
 
 @router.pre_checkout_query()
@@ -320,7 +320,7 @@ async def gift_after(uid, code, plan, scr):
         await panel.set_expiry(rid, until)
         s = db.get_user(uid)
         frm = (s["name"] or "").strip() or ("@" + s["username"] if s["username"] else "друг")
-        await B.bot.send_message(rid, f"🎁 <b>Тебе подарили подписку</b>\n\n{esc(frm)} дарит тебе {days} дн. NQYRO. Уже работает.")
+        await B.bot.send_message(rid, f"<b>Тебе подарили подписку</b>\n\n{esc(frm)} дарит тебе {days} дн. NQYRO. Уже работает.")
         await B.safe_send(rid, screens.promo_ok(db.get_user(rid), days, until))
         r = db.get_user(rid); nm = (r["name"] or "").strip() or ("@" + r["username"] if r["username"] else str(rid))
         return ("06_success.png", f"<b>Подарок отправлен</b>\n\n{esc(nm)} получил {days} дн. подписки, я ему уже написал.", kb([("Главное меню", "go:start")]))
@@ -381,8 +381,8 @@ def fraud_info(uid):
 def fraud_line(uid):
     f = fraud_info(uid)
     head = f"Приглашено: {f['n']}, платили: {f['paid']}"
-    if f["score"] >= 2: return f"⚠️ <b>Антифрод: подозрительно</b> (балл {f['score']}). {head}.\n- " + "\n- ".join(f["why"])
-    return f"✅ Антифрод: без замечаний. {head}." + (f" Мелочь: {'; '.join(f['why'])}." if f["why"] else "")
+    if f["score"] >= 2: return f"<b>Антифрод: подозрительно</b> (балл {f['score']}). {head}.\n- " + "\n- ".join(f["why"])
+    return f"Антифрод: без замечаний. {head}." + (f" Мелочь: {'; '.join(f['why'])}." if f["why"] else "")
 
 @router.message(Command("fraud"), is_admin)
 async def cmd_fraud(m: Message, command: CommandObject):
@@ -589,10 +589,10 @@ async def _traffic_gb(uid):
 def status_line():
     s = monitor.STATE
     if s["ok"] is None or time.time() - s["ts"] > 3 * max(config.MONITOR_SEC, 60): return None
-    if s["ok"] is False: return "🟡 Сервер управления временно недоступен, мы уже разбираемся"
-    if s["total"] and s["up"] == s["total"]: return "🟢 Все серверы работают"
-    if s["up"] == 0 and s["total"]: return "🔴 Серверы недоступны, мы уже чиним"
-    if s["total"]: return "🟡 Часть серверов недоступна, остальные работают"
+    if s["ok"] is False: return "Сервер управления временно недоступен, мы уже разбираемся"
+    if s["total"] and s["up"] == s["total"]: return "Все серверы работают"
+    if s["up"] == 0 and s["total"]: return "Серверы недоступны, мы уже чиним"
+    if s["total"]: return "Часть серверов недоступна, остальные работают"
     return None
 
 async def profile_extra(uid, scr):

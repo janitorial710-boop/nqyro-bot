@@ -20,10 +20,10 @@ def start(u):
         "<b>NQYRO (читается «найро»)</b>\n\nVPN, который не бесит. Включил и пользуешься."
         + ("" if used else "\n\nНовым пользователям 5 дней бесплатно."),
         kb(*([] if used else [[("Попробовать 5 дней", "trial")]]),
-           [("Подключиться", "go:connect"), ("Тарифы", "go:plans")],
-           [("Профиль", "go:profile"), ("Друзья", "go:friends")],
-           [("Промокод", "promo"), ("Поддержка", "go:support")],
-           [("Вывести деньги", "wd:start")]))
+           [("Подключиться", "go:connect")],
+           [("Тарифы", "go:plans"), ("Профиль", "go:profile")],
+           [("Друзья", "go:friends"), ("Промокод", "promo")],
+           [("Поддержка", "go:support")]))
 
 def trial(u, ok=True):
     if not ok:
@@ -44,11 +44,17 @@ def connect(u, sub=None):
         "<b>Подключение за 3 шага</b>\n\n1. Установи Happ или Incy\n2. Нажми «Добавить подписку»\n3. Включи VPN и пользуйся",
         Markup(inline_keyboard=[
             [b("Скачать Happ", "url:" + config.HAPP_URL), b("Скачать Incy", "url:" + config.INCY_URL)],
-            *([[b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=quote(sub, safe="")))],
-               [b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=quote(sub, safe="")))]] if config.OPEN_URL else []),
+            *([[b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=quote(sub, safe=""))),
+                b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=quote(sub, safe="")))]] if config.OPEN_URL else []),
             [Btn(text="Скопировать ссылку", copy_text=CopyTextButton(text=sub))],
             [b("Устройства", "dev:open"), b("Не работает?", "faq:open")],
             [b("Назад", "go:start")]]))
+
+def connect_error(u):
+    return ("03_connect.png",
+        "<b>Не удалось получить ссылку</b>\n\nСервер подключения не ответил. Обычно это проходит за минуту. "
+        "Нажми «Повторить»; если не получится, напиши в поддержку, подписка при этом не пропадёт.",
+        kb([("Повторить", "go:connect")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
 
 def _rub(n): return f"{n:,}".replace(",", " ")
 
@@ -68,14 +74,14 @@ def plans(u):
         + (f"\n\nАкция «{sale['title']}» до {d(sale['end'])}." if sale and sale["title"] else "")
         + (f"\n\nТвоя скидка ({dl}) уже учтена в цене на кнопках." if dl else ""),
         kb([(f"1 месяц · {_rub(pr['1'])} ₽", "buy:1")], [(f"3 месяца · {_rub(pr['3'])} ₽", "buy:3")], [(f"12 месяцев · {_rub(pr['12'])} ₽", "buy:12")],
-           [(f"💳 Пополнить на любую сумму · от {config.TOPUP_MIN} ₽", "go:topup")],
-           [("Подарить подписку", "go:gift")], [("Назад", "go:start")]))
+           [("Пополнить баланс", "go:topup"), ("Подарить подписку", "go:gift")],
+           [("Назад", "go:start")]))
 
 def gift_plans(u):
     return ("04_plans.png",
         "<b>Подарить подписку</b>\n\nВыбери срок. После оплаты получишь код и ссылку: отправь их другу, и подписка добавится ему сама. Код одноразовый.",
         kb([("1 месяц · 249 ₽", "gbuy:1")], [("3 месяца · 599 ₽", "gbuy:3")], [("12 месяцев · 1 990 ₽", "gbuy:12")],
-           [("🎁 Подарить по @нику", "gn:start")], [("Назад", "go:plans")]))
+           [("Подарить по нику", "gn:start")], [("Назад", "go:plans")]))
 
 def gift_ready(u, code):
     link = f"https://t.me/{config.BOT_USERNAME}?start=gift_{code}"
@@ -98,9 +104,9 @@ def payment(u, plan, gift=False):
     base = config.PLANS[plan][0]
     price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка: {dlabel})" if price != base else "")
     return ("05_payment.png", f"<b>{'Оплата подарка' if gift else 'Оплата'}</b>\n\nТариф: {name}\n{price_line}{bal_line}\n\nВыбери способ оплаты.",
-        kb(*rows, [("СБП", f"{g}pay:{plan}:sbp")], [("Банковская карта", f"{g}pay:{plan}:card")],
+        kb(*rows, [("СБП", f"{g}pay:{plan}:sbp"), ("Банковская карта", f"{g}pay:{plan}:card")],
            [("Другие способы", f"{g}pay:{plan}:any")], *_alt_rows(f"{g}pay:{plan}"),
-           *([] if gift or not config.AUTORENEW else [[(("✅ " if u["autorenew"] else "☐ ") + "Автопродление картой", f"ar:t:{plan}")]]),
+           *([] if gift or not config.AUTORENEW else [[("Автопродление картой: " + ("включено" if u["autorenew"] else "выключено"), f"ar:t:{plan}")]]),
            *([] if gift else [[("Пополнить баланс", "go:topup")]]),
            [("Назад", "go:gift" if gift else "go:plans")]))
 
@@ -108,8 +114,8 @@ def _alt_rows(prefix):
     """Кнопки Stars и CryptoBot отключены по решению владельца. Вернуть: убрать return [] ниже."""
     return []
     row = []
-    if config.STARS_RUB_PER_STAR > 0: row.append(("⭐ Telegram Stars", f"{prefix}:stars"))
-    if config.CRYPTO_TOKEN: row.append(("₿ Крипта", f"{prefix}:crypto"))
+    if config.STARS_RUB_PER_STAR > 0: row.append(("Telegram Stars", f"{prefix}:stars"))
+    if config.CRYPTO_TOKEN: row.append(("Крипта", f"{prefix}:crypto"))
     return [row] if row else []
 
 def _dfmt(secs):
@@ -145,7 +151,7 @@ def topup_pay(u, amount):
     bonus = int(amount * config.TOPUP_BONUS_PERCENT / 100)
     line = f"Сумма: {amount} ₽" + (f"\nБонус: +{bonus} ₽\nНа баланс придёт: {amount + bonus} ₽" if bonus else "")
     return ("05_payment.png", f"<b>Пополнение баланса</b>\n\n{line}\n\nВыбери способ оплаты.",
-            kb([("СБП", f"tpay:{amount}:sbp")], [("Банковская карта", f"tpay:{amount}:card")],
+            kb([("СБП", f"tpay:{amount}:sbp"), ("Банковская карта", f"tpay:{amount}:card")],
                [("Другие способы", f"tpay:{amount}:any")], *_alt_rows(f"tpay:{amount}"), [("Назад", "go:topup")]))
 
 def topup_ok(u):
@@ -187,10 +193,13 @@ def profile(u):
             f"Баланс: {db.total_balance(u):.0f} ₽"
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
-        kb([("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")], [("Подключиться", "go:connect"), ("Промокод", "promo")],
+        kb([("Подключиться", "go:connect"), ("Продлить", "go:plans")],
+           [("Пополнить баланс", "go:topup"), ("Вывести деньги", "wd:start")],
            *([[("Обменять баланс на дни", "go:convert")]] if db.convert_quote(u)[0] else []),
-           *([[("🔁 Автопродление", "ar:open")]] if config.AUTORENEW else []),
-           *([[("🤝 Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []), [("Поддержка", "go:support"), ("Назад", "go:start")]))
+           *([[("Автопродление", "ar:open")]] if config.AUTORENEW else []),
+           *([[("Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []),
+           [("Промокод", "promo"), ("Поддержка", "go:support")],
+           [("Назад", "go:start")]))
 
 def friends(u):
     n, earned, bal = db.friends_stats(u["id"])
@@ -199,7 +208,7 @@ def friends(u):
         f"<b>Приглашай друзей</b>\n\nДруг получает 5 дней бесплатно, а ты {config.REF_PERCENT}% с каждой его оплаты на свой баланс.\n\n"
         f"Приглашено: {n} · Заработано: {earned:.0f} ₽\nНа реферальном балансе: {bal:.0f} ₽\n"
         f"Им можно оплатить подписку.\n\nТвоя ссылка:\n<code>{link}</code>",
-        kb([("Оплатить подписку балансом", "go:plans")], [("Назад", "go:start")]))
+        kb([("Оплатить подписку балансом", "go:plans")], [("Вывести деньги", "wd:start")], [("Назад", "go:start")]))
 
 def expiring(u):
     return ("09_expiring.png", "<b>Подписка заканчивается через 3 дня</b>\n\nПродли сейчас, и доступ не прервётся.",

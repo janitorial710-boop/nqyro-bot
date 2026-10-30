@@ -105,11 +105,11 @@ async def cmd_maintenance(m: Message, command: CommandObject):
     if word == "on":
         text = a.split(None, 1)[1] if len(a.split(None, 1)) > 1 else "Идут технические работы. Скоро вернёмся."
         db.kv_set("maint", "1"); db.kv_set("maint_text", text); B.alog(m, "maintenance", "on", text[:100])
-        return await m.answer(f"🔧 Режим техработ включён. Обычным пользователям бот отвечает:\n\n{esc(text)}\n\nВыключить: /maintenance off")
+        return await m.answer(f"Режим техработ включён. Обычным пользователям бот отвечает:\n\n{esc(text)}\n\nВыключить: /maintenance off")
     if word == "off":
         db.kv_set("maint", ""); B.alog(m, "maintenance", "off")
-        return await m.answer("✅ Режим техработ выключен.")
-    await m.answer(("🔧 Сейчас включён.\n" if maint_on() else "Сейчас выключен.\n")
+        return await m.answer("Режим техработ выключен.")
+    await m.answer(("Сейчас включён.\n" if maint_on() else "Сейчас выключен.\n")
                    + "Включить: /maintenance on [ТЕКСТ]\nВыключить: /maintenance off\nВладелец, поддержка и бухгалтер пользуются ботом как обычно.")
 
 # ================= Устройства (для человека) =================
@@ -130,8 +130,8 @@ async def dev_screen(uid, note=""):
     L += ["", "Если ты удалил подписку из приложения и добавил заново, а серверов нет, старая запись устройства занимает место. "
               "Нажми «Сбросить все», потом обнови подписку в приложении."]
     if note: L = [note, ""] + L
-    rows = [[("Сбросить все", "dev:ask")]] if devs else []
-    rows += [[("Обновить список", "dev:open")], [("Назад", "go:connect")]]
+    rows = [[("Сбросить все", "dev:ask"), ("Обновить", "dev:open")]] if devs else [[("Обновить", "dev:open")]]
+    rows += [[("Назад", "go:connect")]]
     return ("22_devices.png", "\n".join(L), kb(*rows))
 
 @router.callback_query(F.data == "dev:open")
@@ -143,7 +143,7 @@ async def cb_dev_ask(c: CallbackQuery):
     await answer_cb(c)
     await B.show(c, ("22_devices.png", "<b>Сбросить все устройства?</b>\n\nВсе подключённые устройства отвяжутся. "
                      "Потом открой приложение, нажми «Обновить» у подписки, и устройство снова зарегистрируется.",
-                     kb([("Да, сбросить", "dev:yes")], [("Отмена", "dev:open")])))
+                     kb([("Да, сбросить", "dev:yes"), ("Отмена", "dev:open")])))
 
 @router.callback_query(F.data == "dev:yes")
 async def cb_dev_yes(c: CallbackQuery):
@@ -159,7 +159,7 @@ async def cb_dev_yes(c: CallbackQuery):
         return await answer_cb(c, "Не получилось сбросить. Напиши в поддержку.", True)
     db.kv_set(f"devreset:{uid}", str(int(time.time())))
     await answer_cb(c, "Готово")
-    await B.show(c, await dev_screen(uid, "✅ Устройства отвязаны. Обнови подписку в приложении."))
+    await B.show(c, await dev_screen(uid, "Устройства отвязаны. Обнови подписку в приложении."))
 
 # ================= Вывод реферальных денег =================
 def wd_info(uid):
@@ -215,7 +215,7 @@ def wd_screen(uid):
     if i.get("blocked"):
         L += ["", "Вывод для твоего аккаунта сейчас недоступен. Если это ошибка, напиши в поддержку."]
     elif i["pending"]:
-        L += ["", f"⏳ Заявка #{i['pending']['id']} на {rub(i['pending']['amount'])} ₽ уже в обработке."]
+        L += ["", f"Заявка #{i['pending']['id']} на {rub(i['pending']['amount'])} ₽ уже в обработке."]
     elif i["cool_until"]:
         L += ["", f"Следующий вывод будет доступен {B.dfmt(i['cool_until'])}."]
     elif i["avail"] < _min(uid):
@@ -284,7 +284,7 @@ async def got_wd(m: Message):
         st["amount"] = amount; st["step"] = "confirm"
         return await B.show(m, ("16_withdraw.png", f"<b>Проверь заявку</b>\n\nСумма: {rub(amount)} ₽\nКуда: {esc(mask(st['method'], st['details']))}\n\n"
                                  "Деньги спишутся с реферального баланса сразу. Если заявку отклонят, вернутся.",
-                                 kb([("Подтвердить", "wd:ok")], [("Отмена", "wd:start")])))
+                                 kb([("Подтвердить", "wd:ok"), ("Отмена", "wd:start")])))
 
 @router.callback_query(F.data == "wd:ok")
 async def cb_wd_ok(c: CallbackQuery):
@@ -305,9 +305,9 @@ async def cb_wd_ok(c: CallbackQuery):
     u = db.peek_user(uid)
     prev = con.execute("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE user_id=? AND status='paid'", (uid,)).fetchone()[0]
     await tell(config.ADMIN_IDS,
-               f"💸 <b>Заявка на вывод #{pid}</b>\n{B.who(u)} · <code>{uid}</code>\nСумма: <b>{rub(amount)} ₽</b>\nСпособ: {METHODS[st['method']]}\n"
+               f"<b>Заявка на вывод #{pid}</b>\n{B.who(u)} · <code>{uid}</code>\nСумма: <b>{rub(amount)} ₽</b>\nСпособ: {METHODS[st['method']]}\n"
                f"Реквизиты: <code>{esc(st['details'])}</code>\nВыплачено ему раньше: {rub(prev)} ₽\n\n{B.features.fraud_line(uid)}",
-               kb([("✅ Выплачено", f"wdp:ok:{pid}"), ("❌ Отклонить", f"wdp:no:{pid}")]))
+               kb([("Выплачено", f"wdp:ok:{pid}"), ("Отклонить", f"wdp:no:{pid}")]))
 
 async def payout_paid(pid, actor_id):
     p = con.execute("SELECT * FROM payouts WHERE id=?", (pid,)).fetchone()
@@ -352,7 +352,7 @@ async def cb_wdp(c: CallbackQuery):
         await answer_cb(c, "Отмечено как выплачено")
         try: await c.message.edit_reply_markup(reply_markup=None)
         except Exception: pass
-        await c.message.answer(f"✅ Заявка #{pid} выплачена, человеку отправлено сообщение.")
+        await c.message.answer(f"Заявка #{pid} выплачена, человеку отправлено сообщение.")
     else:
         WD_REJ[c.from_user.id] = (pid, time.time())
         await answer_cb(c)
@@ -368,13 +368,13 @@ async def got_reject_reason(m: Message):
     p = await payout_reject(pid, txt[:300])
     if not p: return await m.answer("Заявка уже обработана.")
     db.log_action(m.from_user.id, "payout_rejected", str(p["user_id"]), f"#{pid}: {txt[:100]}")
-    await m.answer(f"❌ Заявка #{pid} отклонена, деньги вернулись на баланс человека.")
+    await m.answer(f"Заявка #{pid} отклонена, деньги вернулись на баланс человека.")
 
 @router.message(Command("payouts"), is_owner)
 async def cmd_payouts(m: Message):
     rows = con.execute("SELECT * FROM payouts ORDER BY (status='pending') DESC, id DESC LIMIT 15").fetchall()
     if not rows: return await m.answer("Заявок на вывод пока нет.")
-    mark = {"pending": "⏳", "paid": "✅", "rejected": "❌"}
+    mark = {"pending": "Ждёт", "paid": "Выплачено", "rejected": "Отклонено"}
     L = [f"{mark[r['status']]} #{r['id']} · {B.tfmt(r['created'], '%d.%m %H:%M')} · {rub(r['amount'])} ₽ · {METHODS.get(r['method'], r['method'])} · <code>{r['user_id']}</code>"
          + (f"\n    <code>{esc(r['details'])}</code>" if r["status"] == "pending" else "") for r in rows]
     paid = con.execute("SELECT COALESCE(SUM(amount),0), COUNT(*) FROM payouts WHERE status='paid'").fetchone()
@@ -387,7 +387,7 @@ async def cmd_payoutok(m: Message, command: CommandObject):
     p = await payout_paid(int(a[0]), m.from_user.id)
     if not p: return await m.answer("Заявка не найдена или уже обработана.")
     B.alog(m, "payout_paid", p["user_id"], f"#{p['id']} {p['amount']}")
-    await m.answer(f"✅ Заявка #{p['id']} выплачена.")
+    await m.answer(f"Заявка #{p['id']} выплачена.")
 
 @router.message(Command("payoutno"), is_owner)
 async def cmd_payoutno(m: Message, command: CommandObject):
@@ -396,7 +396,7 @@ async def cmd_payoutno(m: Message, command: CommandObject):
     p = await payout_reject(int(parts[0]), parts[1][:300])
     if not p: return await m.answer("Заявка не найдена или уже обработана.")
     B.alog(m, "payout_rejected", p["user_id"], f"#{p['id']}: {parts[1][:100]}")
-    await m.answer(f"❌ Заявка #{p['id']} отклонена, деньги вернулись.")
+    await m.answer(f"Заявка #{p['id']} отклонена, деньги вернулись.")
 
 # ================= FAQ и обращения в поддержку =================
 FAQ = [
@@ -419,7 +419,7 @@ FAQ = [
 ]
 
 def faq_screen():
-    rows = [[(q, f"faq:{i}")] for i, (q, _) in enumerate(FAQ)] + [[("Написать в поддержку", "tk:new")], [("Назад", "go:support")]]
+    rows = [[(q, f"faq:{i}")] for i, (q, _) in enumerate(FAQ)] + [[("Создать обращение", "tk:new")], [("Назад", "go:support")]]
     return ("19_faq.png", "<b>Частые вопросы</b>\n\nВыбери, что случилось. Если ответа нет, напиши нам.", kb(*rows))
 
 @router.callback_query(F.data == "faq:open")
@@ -432,7 +432,7 @@ async def cb_faq_item(c: CallbackQuery):
     if i >= len(FAQ): return await answer_cb(c)
     await answer_cb(c)
     await B.show(c, ("19_faq.png", f"<b>{FAQ[i][0]}</b>\n\n{FAQ[i][1]}",
-                     kb([("Не помогло, написать", "tk:new")], [("К вопросам", "faq:open")])))
+                     kb([("Не помогло, написать", "tk:new")], [("Назад", "faq:open")])))
 
 def tk_open_for(uid):
     return con.execute("SELECT * FROM tickets WHERE user_id=? AND status='open' ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
@@ -464,8 +464,8 @@ async def got_ticket(m: Message):
         tid = con.execute("INSERT INTO tickets(user_id,status,created) VALUES(?, 'open', ?)", (uid, int(time.time()))).lastrowid
     con.execute("INSERT INTO ticket_msgs(ticket_id,staff,text,ts) VALUES(?,0,?,?)", (tid, text[:2000] or "[фото]", int(time.time()))); con.commit()
     u = db.peek_user(uid)
-    head = f"📩 <b>Обращение #{tid}</b> · {B.who(u)} · <code>{uid}</code>\n\n{esc(text) or '[фото без подписи]'}"
-    markup = kb([("💬 Ответить", f"tkr:{tid}"), ("✅ Закрыть", f"tkc:{tid}")])
+    head = f"<b>Обращение #{tid}</b> · {B.who(u)} · <code>{uid}</code>\n\n{esc(text) or '[фото без подписи]'}"
+    markup = kb([("Ответить", f"tkr:{tid}"), ("Закрыть", f"tkc:{tid}")])
     for sid in support_ids():
         try:
             if m.photo: await B.bot.send_photo(sid, m.photo[-1].file_id, caption=head[:1000], reply_markup=markup)
@@ -491,7 +491,7 @@ async def send_reply(tid, staff_id, text):
     if not t: return "Обращение не найдено."
     con.execute("INSERT INTO ticket_msgs(ticket_id,staff,text,ts) VALUES(?,?,?,?)", (tid, staff_id, text[:2000], int(time.time()))); con.commit()
     try:
-        await B.bot.send_message(t["user_id"], f"💬 <b>Ответ поддержки</b> · обращение #{tid}\n\n{esc(text)}",
+        await B.bot.send_message(t["user_id"], f"<b>Ответ поддержки</b> · обращение #{tid}\n\n{esc(text)}",
                                  reply_markup=kb([("Ответить", f"tk:cont:{tid}")]))
     except TelegramForbiddenError:
         return "Не доставлено: человек заблокировал бота."
@@ -504,7 +504,7 @@ async def got_staff_reply(m: Message):
     if txt.lower() in ("отмена", "cancel") or time.time() - ts > 1800:
         return await m.answer("Отменено.")
     err = await send_reply(tid, m.from_user.id, txt)
-    await m.answer(err or f"✅ Ответ по #{tid} отправлен.", reply_markup=None if err else kb([("✅ Закрыть обращение", f"tkc:{tid}")]))
+    await m.answer(err or f"Ответ по #{tid} отправлен.", reply_markup=None if err else kb([("Закрыть обращение", f"tkc:{tid}")]))
 
 async def close_ticket(tid, staff_id):
     t = con.execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
@@ -512,7 +512,7 @@ async def close_ticket(tid, staff_id):
     con.execute("UPDATE tickets SET status='closed', closed_at=? WHERE id=?", (int(time.time()), tid)); con.commit()
     db.log_action(staff_id, "ticket_close", str(t["user_id"]), f"#{tid}")
     await B.safe_send(t["user_id"], ("25_ticket_closed.png", f"<b>Обращение #{tid} закрыто</b>\n\nПомогли ли мы тебе?",
-                                      kb([("👍 Помогли", f"tk:rate:{tid}:1"), ("👎 Не помогли", f"tk:rate:{tid}:0")])))
+                                      kb([("Помогли", f"tk:rate:{tid}:1"), ("Не помогли", f"tk:rate:{tid}:0")])))
     return t
 
 @router.callback_query(F.data.startswith("tkc:"), lambda c: c.from_user.id in support_ids())
@@ -549,13 +549,13 @@ async def cmd_reply(m: Message, command: CommandObject):
     parts = (command.args or "").split(None, 1)
     if len(parts) < 2 or not parts[0].isdigit(): return await m.answer("Формат: /reply НОМЕР ТЕКСТ")
     err = await send_reply(int(parts[0]), m.from_user.id, parts[1])
-    await m.answer(err or "✅ Отправлено.")
+    await m.answer(err or "Отправлено.")
 
 @router.message(Command("close"), is_support)
 async def cmd_close(m: Message, command: CommandObject):
     a = args_of(command)
     if not a or not a[0].isdigit(): return await m.answer("Формат: /close НОМЕР")
-    await m.answer("✅ Закрыто." if await close_ticket(int(a[0]), m.from_user.id) else "Обращение не найдено или уже закрыто.")
+    await m.answer("Закрыто." if await close_ticket(int(a[0]), m.from_user.id) else "Обращение не найдено или уже закрыто.")
 
 @router.message(Command("ticketstats"), is_owner)
 async def cmd_ticketstats(m: Message):
@@ -771,6 +771,46 @@ async def cmd_sub(m: Message, command: CommandObject):
     if info and info.get("subscriptionUrl"): await m.answer(f"Ссылка {u['id']}:\n<code>{esc(info['subscriptionUrl'])}</code>")
     else: await m.answer("В панели такого пользователя нет (или панель недоступна).")
 
+@router.message(Command("diag"), is_owner)
+async def cmd_diag(m: Message, command: CommandObject):
+    u, _ = await pick_user(m, command, "Формат: /diag ID\nПочему человек не подключается: сверяет бота и панель и называет причину.")
+    if not u: return
+    ok, d = await panel_do(m, panel.diagnose(u["id"]))
+    if not ok: return
+    now = time.time(); active = (u["sub_until"] or 0) > now
+    L = [f"<b>Диагностика {u['id']}</b>", "",
+         f"Бот: подписка {B.sub_status(u)}", ""]
+    problems = []
+    p = d.get("picked")
+    if not p:
+        L.append("Панель: такого пользователя нет")
+        if active: problems.append("В панели человека нет. Пусть нажмёт «Подключиться», бот создаст его. Если он уже нажимал и не создался, смотри /health и логи.")
+    else:
+        try: exp = panel._parse_iso(p["expireAt"]) if p.get("expireAt") else 0
+        except Exception: exp = 0
+        sq = p.get("activeInternalSquads")
+        L.append(f"Панель: <code>{esc(p.get('username'))}</code>, статус {esc(p.get('status'))}")
+        L.append("Срок в панели: " + (B.tfmt(exp) if exp else "не задан") + (f" (в боте {B.tfmt(u['sub_until'])})" if u["sub_until"] else ""))
+        L.append("Сквады: " + (", ".join(esc(x.get("name") or x.get("uuid")) if isinstance(x, dict) else esc(x) for x in sq) if sq else ("нет" if sq is not None else "панель не сказала")))
+        lim = p.get("hwidDeviceLimit")
+        if d.get("devices") is not None:
+            L.append(f"Устройства: {len(d['devices'])} из {lim if lim is not None else '?'}")
+        elif d.get("devices_err"):
+            L.append("Устройства: не удалось получить (" + esc(d["devices_err"])[:120] + ")")
+        L.append("Ссылка: " + (f"<code>{esc(p['subscriptionUrl'])}</code>" if p.get("subscriptionUrl") else "нет"))
+        if active and p.get("status") != "ACTIVE": problems.append(f"В боте подписка активна, а в панели статус {p.get('status')}. Пусть нажмёт «Подключиться»: бот выровняет. Если статус DISABLED, проверь /unban.")
+        if not active and p.get("status") == "ACTIVE": problems.append("Подписка в боте закончилась, а в панели ещё активна. Это самопроходит, или /revoke.")
+        if active and exp and abs(exp - u["sub_until"]) > 120: problems.append("Срок в панели расходится с ботом больше чем на 2 минуты. «Подключиться» выровняет.")
+        if sq is not None and not sq and active: problems.append("У пользователя нет внутреннего сквада: приложение откроется, но серверов не будет. Назначь сквад в панели.")
+        if d.get("devices") is not None and lim and len(d["devices"]) >= lim: problems.append(f"Лимит устройств исчерпан ({len(d['devices'])} из {lim}): новое устройство не получит серверы. /resetdevices {u['id']} освободит.")
+    if len(d.get("matches") or []) > 1:
+        L.append("")
+        L.append(f"С его Telegram ID в панели {len(d['matches'])} записи: " + ", ".join(f"{esc(x.get('username'))} ({esc(x.get('status'))})" for x in d["matches"]))
+        problems.append("Дубликаты в панели. Бот берёт запись tg_<id>, лишние лучше удалить в панели.")
+    L.append("")
+    L.append("<b>Что не так:</b>\n" + "\n".join("• " + x for x in problems) if problems else "Явных проблем не вижу. Если человек всё равно не подключается, пусть пришлёт скриншот ошибки в приложении.")
+    await m.answer("\n".join(L), disable_web_page_preview=True)
+
 @router.message(Command("revoke"), is_owner)
 async def cmd_revoke(m: Message, command: CommandObject):
     u, rest = await pick_user(m, command, "Формат: /revoke ID да\nПеревыпускает ссылку: старая перестанет работать, человеку нужно добавить новую.")
@@ -853,9 +893,9 @@ async def cmd_nodes(m: Message):
     if not ns: return await m.answer("Нод нет.")
     L = [f"<b>Ноды ({len(ns)})</b>", ""]
     for n in ns:
-        mark = "⚪️" if n.get("isDisabled") else ("🟢" if n.get("isConnected") else "🔴")
-        L.append(f"{mark} {esc(n.get('name', '?'))} · онлайн {n.get('usersOnline') or 0} · трафик {gb(n.get('trafficUsedBytes'))}")
-    await m.answer("\n".join(L) + "\n\n🟢 работает · 🔴 нет связи · ⚪️ выключена")
+        mark = "выключена" if n.get("isDisabled") else ("работает" if n.get("isConnected") else "нет связи")
+        L.append(f"{esc(n.get('name', '?'))} · {mark} · онлайн {n.get('usersOnline') or 0} · трафик {gb(n.get('trafficUsedBytes'))}")
+    await m.answer("\n".join(L))
 
 GIVEALL_BUSY = False
 
@@ -894,11 +934,11 @@ async def cmd_giveall(m: Message, command: CommandObject):
 
 # ----- кнопки под карточкой человека (/user) -----
 def card_rows(uid):
-    return [[("📱 Устройства", f"x:dev:{uid}"), ("🗒 Заметка", f"x:note:{uid}")]]
+    return [[("Устройства", f"x:dev:{uid}"), ("Заметка", f"x:note:{uid}")]]
 
 def card_note_line(uid):
     note, _ = get_note(uid)
-    return f"📝 Заметка: {esc(note)}" if note else None
+    return f"Заметка: {esc(note)}" if note else None
 
 @router.callback_query(F.data.startswith("x:"), lambda c: c.from_user.id in config.ADMIN_IDS)
 async def cb_x(c: CallbackQuery):
@@ -908,7 +948,7 @@ async def cb_x(c: CallbackQuery):
         except Exception as e: return await answer_cb(c, str(e)[:190], True)
         await answer_cb(c)
         text = f"<b>Устройства {uid}: {len(devs)}</b>\n" + ("\n".join(f"• {esc(_dev_name(d_))}" for d_ in devs) or "Устройств нет.")
-        await c.message.answer(text, reply_markup=kb([("🔄 Сбросить все", f"x:devreset:{uid}")]) if devs else None)
+        await c.message.answer(text, reply_markup=kb([("Сбросить все", f"x:devreset:{uid}")]) if devs else None)
     elif act == "devreset":
         try: await panel.hwid_reset(uid)
         except Exception as e: return await answer_cb(c, str(e)[:190], True)

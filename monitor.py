@@ -25,14 +25,14 @@ async def run(notify):
                 if fails >= 2: STATE.update(ok=False, ts=time.time())
                 if fails >= 2 and not panel_down:
                     panel_down = True
-                    await notify(f"🔴 Панель Remnawave не отвечает.\nОшибка: {err}\nПроверь сервер панели и PANEL_TOKEN.")
+                    await notify(f"Панель Remnawave не отвечает.\nОшибка: {err}\nПроверь сервер панели и PANEL_TOKEN.")
             else:
                 fails = 0
                 live = [n for n in nodes if not n.get("isDisabled")]
                 STATE.update(ok=True, total=len(live), up=sum(1 for n in live if n.get("isConnected")), ts=time.time())
                 if panel_down:
                     panel_down = False
-                    await notify("🟢 Панель Remnawave снова отвечает.")
+                    await notify("Панель Remnawave снова отвечает.")
                 for n in nodes:
                     key = n.get("uuid") or n.get("name")
                     name = f"{n.get('name') or key} ({n.get('address') or '?'})"
@@ -42,12 +42,12 @@ async def run(notify):
                         if bad[key] >= 2 and key not in alerted:
                             alerted.add(key)
                             msg = n.get("lastStatusMessage")
-                            await notify(f"🔴 Нода упала: {name}." + (f"\nПричина: {msg}" if msg else ""))
+                            await notify(f"Нода упала: {name}." + (f"\nПричина: {msg}" if msg else ""))
                     else:
                         bad[key] = 0
                         if key in alerted:
                             alerted.discard(key)
-                            await notify(f"🟢 Нода снова в сети: {name}.")
+                            await notify(f"Нода снова в сети: {name}.")
         except Exception:
             logging.exception("monitor loop")
         await asyncio.sleep(config.MONITOR_SEC)
