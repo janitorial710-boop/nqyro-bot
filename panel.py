@@ -32,6 +32,27 @@ async def _call(method: str, path: str, **kw):
                 data = data["response"]
             return r.status, data
 
+def _as_user(x):
+    """Приводит ответ панели к одному пользователю. Разные версии панели отдают его по-разному:
+    сам объект, список, {"user": {...}} или {"users": [...]}; id иногда лежит в поле id вместо uuid."""
+    if isinstance(x, list):
+        x = x[0] if x else None
+    if isinstance(x, dict):
+        if not x.get("uuid"):
+            for k in ("user", "users", "items"):
+                if x.get(k): return _as_user(x[k])
+            for k in ("id", "userUuid", "user_uuid"):
+                if x.get(k):
+                    return dict(x, uuid=x[k])
+    return x
+
+def _as_users(data):
+    if isinstance(data, dict) and not data.get("uuid"):
+        for k in ("users", "items", "user"):
+            if data.get(k): data = data[k]; break
+    lst = data if isinstance(data, list) else [data]
+    return [u for u in (_as_user(x) for x in lst) if isinstance(u, dict) and u.get("uuid")]
+
 def _is_outage(st: int) -> bool:
     """Ответ панели, по которому нельзя судить, есть ли пользователь (сбой, перегрузка, нет доступа)."""
     return st >= 500 or st in (401, 403, 408, 429)
@@ -41,12 +62,17 @@ async def _find(uid: int):
     Если панель ответила ошибкой, бросает исключение: иначе бот решит, что человека нет, и попробует создать дубликат."""
     st, data = await _call("GET", f"/api/users/by-username/tg_{uid}")
     if st == 200 and data:
-        return data[0] if isinstance(data, list) else data
+        u = _as_user(data)
+        if isinstance(u, dict) and u.get("uuid"):
+            return u
+        raise RuntimeError("в ответе панели нет uuid пользователя; поля: " + ", ".join(sorted(u)[:20] if isinstance(u, dict) else [type(u).__name__]))
     if _is_outage(st):
         raise RuntimeError(f"panel find by username HTTP {st}")
     st, data = await _call("GET", f"/api/users/by-telegram-id/{uid}")
     if st == 200 and data:
-        lst = data if isinstance(data, list) else [data]
+        lst = _as_users(data)
+        if not lst:
+            raise RuntimeError("в ответе панели нет uuid пользователя (поиск по Telegram ID)")
         # с одним Telegram ID в панели может оказаться несколько записей (заведены вручную при тестах):
         # берём свою tg_<id>, затем активную, затем с самым поздним сроком
         lst.sort(key=lambda x: (x.get("username") == f"tg_{uid}", x.get("status") == "ACTIVE", x.get("expireAt") or ""), reverse=True)
@@ -64,7 +90,7 @@ async def _create(uid: int, until_ts: int):
     st, data = await _call("POST", "/api/users", json=body)
     if st >= 300:
         raise RuntimeError(f"panel create {st}: {data}")
-    return data
+    return _as_user(data)
 
 async def _sync(uid: int, until_ts: int):
     """Создаёт пользователя или выставляет ему дату окончания и статус. Возвращает объект пользователя.
@@ -261,8 +287,8 @@ async def free_device_slot_by_sub(sub: str) -> int:
     if not short:
         return 0
     st, u = await _call("GET", f"/api/users/by-short-uuid/{short}")
-    if isinstance(u, list): u = u[0] if u else None
-    if st != 200 or not u or (u.get("subscriptionUrl") or "").rstrip("/") != sub.rstrip("/"):
+    u = _as_user(u)
+    if st != 200 or not isinstance(u, dict) or not u.get("uuid") or (u.get("subscriptionUrl") or "").rstrip("/") != sub.rstrip("/"):
         return 0
     return await _free_slots(u)
 
@@ -271,15 +297,17 @@ async def diagnose(uid: int) -> dict:
     out = {"matches": [], "devices": None, "devices_err": None}
     st, data = await _call("GET", f"/api/users/by-telegram-id/{uid}")
     if st == 200 and data:
-        out["matches"] = data if isinstance(data, list) else [data]
+        out["matches"] = _as_users(data)
     out["by_telegram_status"] = st
     st2, d2 = await _call("GET", f"/api/users/by-username/tg_{uid}")
     out["by_username_status"] = st2
-    out["by_username"] = d2 if st2 == 200 and isinstance(d2, dict) else None
+    out["by_username"] = _as_user(d2) if st2 == 200 and isinstance(d2, (dict, list)) else None
     u = out["by_username"] or (out["matches"][0] if out["matches"] else None)
     out["picked"] = u
     if u:
         try:
+            if not u.get("uuid"):
+                raise RuntimeError("в ответе панели нет uuid; поля: " + ", ".join(sorted(u)[:20]))
             data = await _ok("GET", f"/api/hwid/devices/{u['uuid']}")
             out["devices"] = (data.get("devices") if isinstance(data, dict) else data) or []
         except Exception as e:
