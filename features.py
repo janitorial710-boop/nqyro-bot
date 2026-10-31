@@ -214,7 +214,7 @@ async def alt_payment(c, plan, method, gift=False, amount=None):
             await B.show(c, screens.pay_link(u, url, pid))
     except Exception:
         logging.exception("alt payment failed")
-        await B.alert_once("alt_pay", f"Не удалось создать счёт ({method}), см. логи. Проверь настройки оплаты.")
+        await B.alert_once("alt_pay", f"Не удалось создать счёт ({method}), см. логи. Проверь настройки оплаты: /ykcheck")
         await B.show(c, screens.error(u))
 
 @router.pre_checkout_query()

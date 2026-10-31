@@ -1,5 +1,5 @@
 """Оплата через ЮKassa. DEV_PAY=1 включает тестовый режим без реальных денег."""
-import logging, uuid
+import logging, time, uuid
 import aiohttp
 import config, db
 
@@ -8,6 +8,16 @@ API = "https://api.yookassa.ru/v3/payments"
 def _session():
     return aiohttp.ClientSession(auth=aiohttp.BasicAuth(config.YK_SHOP_ID, config.YK_SECRET),
                                  timeout=aiohttp.ClientTimeout(total=30))
+
+class YKError(RuntimeError):
+    """Отказ ЮKassa с понятной причиной (код, описание, поле), чтобы её было видно в Telegram, а не только в логах."""
+    def __init__(self, status, data):
+        d = data if isinstance(data, dict) else {}
+        self.status, self.code, self.parameter = status, d.get("code") or "", d.get("parameter") or ""
+        self.description = d.get("description") or (str(data)[:200] if data else "")
+        super().__init__(f"HTTP {status}: {self.code} {self.description}" + (f" (поле {self.parameter})" if self.parameter else ""))
+
+LAST_ERROR = {"ts": 0, "text": ""}   # последняя ошибка создания счёта (смотреть: /ykcheck)
 
 async def create_invoice(uid: int, plan: str, method: str, email: str | None = None, gift: bool = False, amount: int | None = None):
     topup = plan == "topup"
@@ -34,13 +44,30 @@ async def create_invoice(uid: int, plan: str, method: str, email: str | None = N
             "description": "Пополнение баланса NQYRO" if topup else f"{'Подарочная подписка' if gift else 'Подписка'} NQYRO, {name}", "quantity": "1.00", "amount": amount,
             "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
     async with _session() as s:
-        async with s.post(API, json=body, headers={"Idempotence-Key": str(uuid.uuid4())}) as r:
-            data = await r.json()
-            if r.status >= 300:
+        for attempt in (1, 2):
+            async with s.post(API, json=body, headers={"Idempotence-Key": str(uuid.uuid4())}) as r:
+                data = await r.json(content_type=None)
+                if r.status < 300: break
                 logging.error("YooKassa create error %s: %s", r.status, data)
-                raise RuntimeError(f"YooKassa {r.status}")
+                err = YKError(r.status, data)
+                # Сохранение карты для автопродления в магазине может быть не разрешено: платим без него, а не теряем оплату
+                if attempt == 1 and body.get("save_payment_method") and (err.parameter == "save_payment_method" or r.status == 403 or "save_payment_method" in str(data)):
+                    body.pop("save_payment_method")
+                    LAST_ERROR.update(ts=int(time.time()), text="ЮKassa не разрешает сохранять карты (автоплатежи не включены в магазине): " + str(err))
+                    logging.warning("YooKassa: сохранение карты отклонено, создаю счёт без него")
+                    continue
+                LAST_ERROR.update(ts=int(time.time()), text=str(err))
+                raise err
     db.set_yk_id(pid, data["id"])
     return pid, data["confirmation"]["confirmation_url"]
+
+async def account_info() -> dict:
+    """Данные магазина: проверка YK_SHOP_ID и YK_SECRET (GET /v3/me)."""
+    async with _session() as s:
+        async with s.get("https://api.yookassa.ru/v3/me") as r:
+            data = await r.json(content_type=None)
+            if r.status >= 300: raise YKError(r.status, data)
+            return data
 
 async def refund(yk_id: str, amount, email: str | None = None, name: str = "") -> None:
     """Возврат платежа целиком через ЮKassa. Бросает исключение, если ЮKassa отказала."""

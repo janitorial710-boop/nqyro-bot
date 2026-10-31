@@ -172,6 +172,11 @@ async def hwid_reset(uid: int):
     u = await _need_user(uid)
     await _ok("POST", "/api/hwid/devices/delete-all", json={"userUuid": u["uuid"]})
 
+async def hwid_delete(uid: int, hwid: str):
+    """Отвязывает одно устройство."""
+    u = await _need_user(uid)
+    await _ok("POST", "/api/hwid/devices/delete", json={"userUuid": u["uuid"], "hwid": hwid})
+
 async def hwid_limit(uid: int):
     """Текущий лимит устройств человека в панели (или HWID_LIMIT из настроек, если панель не сказала)."""
     u = await _need_user(uid)

@@ -246,7 +246,9 @@ async def start_payment(target, uid, plan, method, gift=False, amount=None):
         pid, url = await payments.create_invoice(uid, plan, method, u["email"], gift, amount)
     except Exception:
         logging.exception("invoice failed"); await show(target, screens.error(u))
-        await alert_once("yk_invoice", "Не удалось создать счёт в ЮKassa (см. логи). Проверь YK_SHOP_ID, YK_SECRET и баланс магазина.")
+        _e = payments.LAST_ERROR["text"] if time.time() - payments.LAST_ERROR["ts"] < 5 else ""
+        await alert_once("yk_invoice", "Не удалось создать счёт в ЮKassa." + (f"\nПричина: {html.escape(_e)}" if _e else " См. логи.")
+                         + "\nПроверить магазин: /ykcheck")
         return
     if url is None:
         await show(target, screens.pay_dev(u, pid))

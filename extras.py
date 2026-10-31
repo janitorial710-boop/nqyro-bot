@@ -116,6 +116,15 @@ async def cmd_maintenance(m: Message, command: CommandObject):
 def _dev_name(d_):
     return " ".join(x for x in (d_.get("platform"), d_.get("deviceModel"), d_.get("osVersion")) if x) or "без названия"
 
+def _dh(hwid):
+    """Короткая метка устройства для кнопки (в callback_data нельзя длинный hwid)."""
+    import hashlib
+    return hashlib.sha1(str(hwid).encode()).hexdigest()[:10]
+
+def _dev_since(d_):
+    s = str(d_.get("createdAt") or "")[:10]   # 2026-10-12 -> 12.10
+    return f"{s[8:10]}.{s[5:7]}" if len(s) == 10 and s[4] == "-" else ""
+
 async def dev_screen(uid, note=""):
     """Экран «Устройства». Если панель не ответила, показывает понятное сообщение."""
     try:
@@ -126,13 +135,58 @@ async def dev_screen(uid, note=""):
                 "Если ты уже подключался и видишь эту надпись, напиши в поддержку.")
         return ("22_devices.png", text, kb([("Назад", "go:connect")]))
     L = [f"<b>Устройства: {len(devs)} из {limit}</b>", ""]
-    L += [f"• {esc(_dev_name(x))}" for x in devs] or ["Пока ни одно устройство не подключено."]
-    L += ["", "Если ты удалил подписку из приложения и добавил заново, а серверов нет, старая запись устройства занимает место. "
-              "Нажми «Сбросить все», потом обнови подписку в приложении."]
+    L += [f"{i}. {esc(_dev_name(x))}" + (f" · с {_dev_since(x)}" if _dev_since(x) else "") for i, x in enumerate(devs, 1)] or ["Пока ни одно устройство не подключено."]
+    L += ["", "Чтобы убрать чужое или старое устройство, нажми на него ниже. Оно потеряет доступ, а место освободится.",
+              "Если подпиской пользуется тот, кому ты её не давал, нажми «Новая ссылка»: старая перестанет работать у всех."]
     if note: L = [note, ""] + L
-    rows = [[("Сбросить все", "dev:ask"), ("Обновить", "dev:open")]] if devs else [[("Обновить", "dev:open")]]
-    rows += [[("Назад", "go:connect")]]
+    rows = [[(f"Отвязать {i}. {_dev_name(x)[:30]}", f"dev:rm:{_dh(x.get('hwid'))}")] for i, x in enumerate(devs[:10], 1)]
+    rows += [[("Сбросить все", "dev:ask"), ("Новая ссылка", "dev:nl")]] if devs else [[("Новая ссылка", "dev:nl")]]
+    rows += [[("Обновить", "dev:open")], [("Назад", "go:connect")]]
     return ("22_devices.png", "\n".join(L), kb(*rows))
+
+@router.callback_query(F.data.startswith("dev:rm:"))
+async def cb_dev_rm(c: CallbackQuery):
+    uid = c.from_user.id; h = c.data.split(":", 2)[2]
+    last = int(db.kv_get(f"devrm:{uid}") or 0)
+    if time.time() - last < 5:
+        return await answer_cb(c, "Подожди пару секунд.", False)
+    try:
+        devs = await panel.hwid_list(uid)
+        hit = next((x for x in devs if _dh(x.get("hwid")) == h), None)
+        if hit: await panel.hwid_delete(uid, hit["hwid"])
+    except Exception as e:
+        logging.warning("device remove uid=%s: %s", uid, e)
+        return await answer_cb(c, "Не получилось отвязать. Попробуй ещё раз или напиши в поддержку.", True)
+    db.kv_set(f"devrm:{uid}", str(int(time.time())))
+    await answer_cb(c, "Готово" if hit else "Это устройство уже отвязано")
+    await B.show(c, await dev_screen(uid, f"Отвязано: {esc(_dev_name(hit))}." if hit else "Это устройство уже было отвязано."))
+
+@router.callback_query(F.data == "dev:nl")
+async def cb_dev_nl(c: CallbackQuery):
+    await answer_cb(c)
+    await B.show(c, ("22_devices.png", "<b>Выпустить новую ссылку?</b>\n\nСтарая ссылка перестанет работать, все устройства отвяжутся, в том числе твои. "
+                     "Срок подписки не изменится.\n\nПотом открой «Подключиться» и добавь подписку в приложение заново.",
+                     kb([("Да, выпустить", "dev:nlyes"), ("Отмена", "dev:open")])))
+
+@router.callback_query(F.data == "dev:nlyes")
+async def cb_dev_nlyes(c: CallbackQuery):
+    uid = c.from_user.id
+    last = int(db.kv_get(f"newlink:{uid}") or 0)
+    wait = config.DEVICE_RESET_COOLDOWN_MIN * 60 - (time.time() - last)
+    if wait > 0:
+        return await answer_cb(c, f"Подожди ещё {int(wait // 60) + 1} мин. и повтори.", True)
+    try:
+        await panel.revoke_sub(uid)
+    except Exception as e:
+        logging.warning("revoke uid=%s: %s", uid, e)
+        return await answer_cb(c, "Не получилось выпустить ссылку. Напиши в поддержку.", True)
+    try: await panel.hwid_reset(uid)
+    except Exception: logging.warning("hwid reset after revoke failed uid=%s", uid)
+    db.kv_set(f"newlink:{uid}", str(int(time.time())))
+    await answer_cb(c, "Готово")
+    await B.show(c, ("22_devices.png", "<b>Новая ссылка выпущена</b>\n\nСтарая больше не работает, устройства отвязаны. "
+                     "Открой «Подключиться» и добавь подписку в приложение заново.",
+                     kb([("Подключиться", "go:connect")], [("Назад", "dev:open")])))
 
 @router.callback_query(F.data == "dev:open")
 async def cb_dev_open(c: CallbackQuery):
@@ -1093,9 +1147,26 @@ async def cmd_promostat(m: Message, command: CommandObject):
         return await m.answer("Именных промокодов пока нет. Создай: /partnerpromo КОД ДНИ ПАРТНЁР")
     await m.answer("\n".join(L).strip(), disable_web_page_preview=True)
 
+@router.message(Command("ykcheck"), is_owner)
+async def cmd_ykcheck(m: Message):
+    import payments
+    if config.DEV_PAY: return await m.answer("Включён тестовый режим (DEV_PAY=1), ЮKassa не используется.")
+    L = []
+    try:
+        d = await payments.account_info()
+        L += [f"Магазин: <code>{esc(d.get('account_id'))}</code>, статус: {esc(d.get('status'))}" + (", ТЕСТОВЫЙ" if d.get("test") else ""),
+              "Способы оплаты, разрешённые магазину: " + (", ".join(esc(x) for x in d.get("payment_methods", [])) or "список не пришёл"),
+              "Чеки (54-ФЗ) в ЮKassa: " + ("включены" if d.get("fiscalization_enabled") else "выключены")]
+    except Exception as e:
+        L.append(f"ЮKassa не принимает ключи: {esc(e)}\nПроверь YK_SHOP_ID и YK_SECRET.")
+    le = payments.LAST_ERROR
+    L.append("Последняя ошибка создания счёта: " + (f"{B.tfmt(le['ts'])}: {esc(le['text'])}" if le["ts"] else "не было с запуска бота"))
+    L.append(f"Режим чеков бота: RECEIPT_MODE={esc(config.RECEIPT_MODE)} · автопродление: {'вкл' if config.AUTORENEW else 'выкл'}")
+    await m.answer("\n".join(L))
+
 # ----- меню команд -----
 OWNER_MENU = [("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
-              ("panel", "Панель: онлайн"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
+              ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
               ("top", "Топы"), ("new", "Новые люди и откуда"), ("partnerpromo", "Именной промокод партнёра"),
               ("promostat", "Статистика промокодов партнёров"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
 SUPPORT_MENU = [("tickets", "Обращения"), ("reply", "Ответить на обращение"), ("devices", "Устройства человека"), ("resetdevices", "Сбросить устройства")]
@@ -1111,5 +1182,6 @@ HELP_OWNER = (
     "/devices ID · /resetdevices ID · /devlimit ID N · /resettraffic ID\n"
     "\n<b>Новые люди и партнёры</b>\n/new [12ч|7д|30]: кто пришёл и откуда (приглашён, источник или сам)\n/newnotify on|off: сообщать о каждом новом сразу\n"
     "/partnerpromo КОД ДНИ ПАРТНЁР [МАКС] [ДАТА]: именной промокод партнёра\n/promostat [ПАРТНЁР]: сколько пришло и заплатило по его кодам\n"
+    "\n<b>Оплата</b>\n/ykcheck: проверить ключи ЮKassa и показать причину последней ошибки счёта\n"
     "\n<b>Бот</b>\n/maintenance on|off [текст]: режим техработ\n/funnel: воронка\n/top: топ приглашающих и платящих\n/export: пользователи в CSV")
 HELP_SUPPORT = "\n/tickets: открытые обращения\n/reply НОМЕР текст: ответить\n/close НОМЕР: закрыть\n/devices ID · /resetdevices ID\n/note ID [текст]: заметка\n/msg ID текст: сообщение человеку"
