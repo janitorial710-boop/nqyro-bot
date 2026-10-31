@@ -144,7 +144,8 @@ async def dev_screen(uid, note=""):
         return ("22_devices.png", text, kb([("Обновить", "dev:open")], [("Назад", "go:profile")]))
     try: limit = await panel.hwid_limit(uid)
     except Exception: limit = config.HWID_LIMIT
-    L = [f"<b>Устройства: {len(devs)} из {limit}</b>", ""]
+    act = db.slots_active(uid)
+    L = [f"<b>Устройства: {len(devs)} из {limit}</b>" + (f" (докуплено: {act})" if act else ""), ""]
     L += [f"{i}. {esc(_dev_name(x))}" + (f" · с {_dev_since(x)}" if _dev_since(x) else "") for i, x in enumerate(devs, 1)] or ["Пока ни одно устройство не подключено."]
     L += ["", "Чтобы убрать чужое или старое устройство, нажми на него ниже. Оно отвяжется и будет заблокировано: снова подключиться оно не сможет, пока ты сам не разрешишь.",
               "Если подпиской пользуется тот, кому ты её не давал, напиши в поддержку: мы выпустим новую ссылку."]
@@ -154,8 +155,10 @@ async def dev_screen(uid, note=""):
     if blocked:
         L += ["", "<b>Заблокированные</b>: они не смогут снова подключиться, пока ты не разрешишь:"] + [f"• {esc(b_['name'] or 'устройство')}" for b_ in blocked[:10]]
         rows += [[(f"Разрешить: {(b_['name'] or 'устройство')[:30]}", f"dev:al:{_dh(b_['hwid'])}")] for b_ in blocked[:10]]
+    if config.SLOT_PRICE > 0 and act < config.SLOT_MAX:
+        rows.append([(f"Докупить устройство · {config.SLOT_PRICE} ₽", "slot:buy")])
     rows += [[("Сбросить все", "dev:ask"), ("Обновить", "dev:open")]] if devs else [[("Обновить", "dev:open")]]
-    rows += [[("Назад", "go:profile")]]
+    rows += [[("Уведомления о новых устройствах: " + ("вкл" if _alert_on(uid) else "выкл"), "dev:alt")], [("Назад", "go:profile")]]
     return ("22_devices.png", "\n".join(L), kb(*rows))
 
 @router.callback_query(F.data.startswith("dev:rm:"))
@@ -1074,6 +1077,8 @@ async def got_xnote(m: Message):
 def start_loops():
     asyncio.create_task(survey_loop())
     asyncio.create_task(block_loop())
+    asyncio.create_task(device_watch_loop())
+    asyncio.create_task(slot_loop())
 
 # ---------- новые люди, именные промокоды партнёров ----------
 def _origin(r):
@@ -1193,7 +1198,7 @@ async def cmd_promostat(m: Message, command: CommandObject):
         for p in prs:
             exp = f", до {B.dfmt(p['expires'])}" if p["expires"] else ""
             L.append(f"    <code>{p['code']}</code> +{p['days']} дн.: активаций {p['used']}" + (f" из {p['max_uses']}" if p["max_uses"] else "")
-                     + f", оплатили {p['payers']} на {rub(p['revenue'])} ₽{exp}")
+                     + f", оплатили {p['payers']} на {rub(p['revenue'])} ₽{exp}" + (" · выключен" if p["off"] else ""))
         L.append("")
     if not found:
         return await m.answer("Именных промокодов пока нет. Создай: /partnerpromo КОД ДНИ ПАРТНЁР")
@@ -1226,9 +1231,174 @@ async def cmd_ykcheck(m: Message):
     L.append(f"Режим чеков бота: RECEIPT_MODE={esc(config.RECEIPT_MODE)} · автопродление: {'вкл' if config.AUTORENEW else 'выкл'}")
     await m.answer("\n".join(L))
 
+
+# ================= Слежение за устройствами, докупка слотов, отчёт о шеринге =================
+_TGMAP = {}   # id пользователя в панели -> Telegram ID
+
+def _alert_on(uid): return db.kv_get(f"devalert_off:{uid}") != "1"
+
+async def _tg_of(d_):
+    ident = d_.get("userId") if d_.get("userId") is not None else d_.get("userUuid")
+    if ident is None: return None
+    key = str(ident)
+    if key in _TGMAP: return _TGMAP[key]
+    tg = await panel.tg_by_ident(ident)
+    if tg: _TGMAP[key] = tg
+    return tg
+
+async def device_watch_pass():
+    """Один проход слежения: находит новые устройства и сообщает человеку. Первый проход только запоминает то, что уже есть.
+    Первое устройство человека и заблокированные не считаются новыми. Возвращает, сколько сообщений отправлено."""
+    now = int(time.time()); seeded = db.kv_get("devwatch_seeded") == "1"
+    pairs, ok = [], True
+    try:
+        for d_ in await panel.hwid_all():
+            tg = await _tg_of(d_)
+            if tg: pairs.append((tg, d_))
+    except Exception as e:
+        ok = False
+        logging.warning("device watch: общий список недоступен (%s), смотрю по людям", e)
+        for r in con.execute("SELECT id FROM users WHERE sub_until>? ORDER BY id LIMIT 300", (now,)).fetchall():
+            try: pairs += [(r["id"], d_) for d_ in await panel.hwid_list(r["id"])]
+            except Exception: pass
+            await asyncio.sleep(0.2)
+    sent = {}
+    for tg, d_ in pairs:
+        hw = str(d_.get("hwid") or "")
+        if not hw or con.execute("SELECT 1 FROM seen_devices WHERE user_id=? AND hwid=?", (tg, hw)).fetchone(): continue
+        prev = con.execute("SELECT COUNT(*) FROM seen_devices WHERE user_id=?", (tg,)).fetchone()[0]
+        con.execute("INSERT OR IGNORE INTO seen_devices(user_id,hwid,first_seen) VALUES(?,?,?)", (tg, hw, now if seeded else 0)); con.commit()
+        if not seeded or prev == 0 or not _alert_on(tg): continue
+        if hw in {b_["hwid"] for b_ in db.blocked_list(tg)}: continue
+        if sent.get(tg, 0) >= 3: continue
+        sent[tg] = sent.get(tg, 0) + 1
+        try:
+            await B.bot.send_photo(tg, B.photo("22_devices.png"),
+                caption=f"<b>Новое устройство на твоей подписке</b>\n\n{esc(_dev_name(d_))}\n\nЕсли это ты, ничего делать не нужно. "
+                        "Если нет, заблокируй его: оно отвяжется и больше не сможет подключиться.",
+                reply_markup=kb([("Заблокировать", f"dev:rm:{_dh(hw)}")], [("Это я", "dev:ok")]))
+        except Exception:
+            logging.warning("не удалось сообщить о новом устройстве uid=%s", tg)
+    if pairs or ok: db.kv_set("devwatch_seeded", "1")
+    return sum(sent.values())
+
+async def device_watch_loop():
+    await asyncio.sleep(30)
+    while True:
+        try: await device_watch_pass()
+        except Exception: logging.exception("device_watch")
+        await asyncio.sleep(120)
+
+@router.callback_query(F.data == "dev:ok")
+async def cb_dev_ok(c: CallbackQuery):
+    await answer_cb(c, "Хорошо")
+    try: await c.message.delete()
+    except Exception: pass
+
+@router.callback_query(F.data == "dev:alt")
+async def cb_dev_alt(c: CallbackQuery):
+    uid = c.from_user.id; on = _alert_on(uid)
+    db.kv_set(f"devalert_off:{uid}", "1" if on else "0")
+    await answer_cb(c, "Уведомления выключены" if on else "Уведомления включены")
+    await B.show(c, await dev_screen(uid))
+
+# ---------- докупка устройства ----------
+def _slot_block(uid):
+    """Причина, по которой докупить нельзя, или None."""
+    if config.SLOT_PRICE <= 0: return "Докупка устройств сейчас недоступна."
+    if db.get_user(uid)["sub_until"] <= time.time(): return "Сначала нужна активная подписка."
+    if db.slots_active(uid) >= config.SLOT_MAX: return f"Больше {config.SLOT_MAX} докупленных устройств нельзя."
+    return None
+
+@router.callback_query(F.data == "slot:buy")
+async def cb_slot_buy(c: CallbackQuery):
+    uid = c.from_user.id; why = _slot_block(uid)
+    if why: return await answer_cb(c, why, True)
+    await answer_cb(c); await B.show(c, screens.slot_offer(db.get_user(uid), db.slots_active(uid)))
+
+@router.callback_query(F.data.startswith("slot:pay:"))
+async def cb_slot_pay(c: CallbackQuery):
+    uid = c.from_user.id; method = c.data.split(":")[2]; why = _slot_block(uid)
+    if why or method not in ("sbp", "card"): return await answer_cb(c, why or "Не получилось.", True)
+    await answer_cb(c); await B.start_payment(c, uid, "slot", method)
+
+@router.callback_query(F.data == "slot:bal")
+async def cb_slot_bal(c: CallbackQuery):
+    uid = c.from_user.id; why = _slot_block(uid)
+    if why: return await answer_cb(c, why, True)
+    until = db.pay_slot_with_balance(uid)
+    if until is None: return await answer_cb(c, "Не хватает средств на балансе.", True)
+    try: await panel.apply_limit(uid)
+    except Exception: logging.exception("apply_limit after balance slot uid=%s", uid)
+    await answer_cb(c); await B.show(c, screens.slot_ok(db.get_user(uid), until))
+
+async def slot_pass():
+    """Сверяет лимит устройств в панели с докупленными слотами (в том числе после их окончания) и напоминает за 2 дня."""
+    n = 0
+    for uid in db.slot_users():
+        try: await panel.apply_limit(uid); n += 1
+        except Exception as e: logging.warning("slot limit uid=%s: %s", uid, e)
+        await asyncio.sleep(0.3)
+    now = int(time.time())
+    for r in con.execute("SELECT id, user_id FROM slots WHERE notified=0 AND until>? AND until<?", (now, now + 2 * 86400)).fetchall():
+        con.execute("UPDATE slots SET notified=1 WHERE id=?", (r["id"],)); con.commit()
+        try:
+            name, text, markup = screens.slot_expiring(db.get_user(r["user_id"]))
+            await B.bot.send_photo(r["user_id"], B.photo(name), caption=text, reply_markup=markup)
+        except Exception: logging.warning("напоминание о слоте не ушло uid=%s", r["user_id"])
+    return n
+
+async def slot_loop():
+    await asyncio.sleep(60)
+    while True:
+        try: await slot_pass()
+        except Exception: logging.exception("slot_loop")
+        await asyncio.sleep(600)
+
+# ---------- отчёт: кто делится подпиской ----------
+@router.message(Command("sharing"), is_owner)
+async def cmd_sharing(m: Message, command: CommandObject):
+    a = (command.args or "").strip(); days = int(a) if a.isdigit() and 1 <= int(a) <= 90 else 7
+    now = int(time.time()); since = now - days * 86400
+    counts = None
+    try:
+        counts = {}
+        for d_ in await panel.hwid_all():
+            tg = await _tg_of(d_)
+            if tg: counts[tg] = counts.get(tg, 0) + 1
+    except Exception: counts = None
+    q = lambda sql, *p: con.execute(sql, p).fetchone()[0]
+    found = []
+    for u in con.execute("SELECT * FROM users WHERE sub_until>?", (now,)).fetchall():
+        new = q("SELECT COUNT(*) FROM seen_devices WHERE user_id=? AND first_seen>=? AND first_seen>0", u["id"], since)
+        blk = q("SELECT COUNT(*) FROM blocked_devices WHERE user_id=? AND ts>=?", u["id"], since)
+        lim = config.HWID_LIMIT + db.slots_active(u["id"])
+        cur = counts.get(u["id"]) if counts is not None else None
+        full = cur is not None and cur >= lim
+        if new >= 2 or blk >= 1 or (full and new >= 1):
+            found.append((new * 2 + blk * 2 + (1 if full else 0), u, new, blk, cur, lim))
+    if not found:
+        return await m.answer(f"За {days} дн. подозрительных подписок нет. Данные копятся с момента включения слежения за устройствами.")
+    found.sort(key=lambda x: -x[0]); found = found[:20]
+    prof = {r["id"]: r for r in await B.fill_profiles([x[1] for x in found])}
+    lines = [f'{B.who(prof[u["id"]])} · <code>{u["id"]}</code> · устройств {cur if cur is not None else "?"} из {lim} · новых за {days} дн.: {new} · блокировок: {blk}'
+             for _, u, new, blk, cur, lim in found]
+    await B.send_lines(m, f"<b>Кто возможно делится подпиской (за {days} дн.)</b>",
+                       lines, "\nЧто делать: предложить докупить устройство или перевыпустить ссылку: /revoke ID да")
+
+# ---------- выключение промокода без удаления ----------
+@router.message(Command("promooff", "promoon"), is_owner)
+async def cmd_promo_switch(m: Message, command: CommandObject):
+    off = (m.text or "").lstrip("/").split()[0].split("@")[0].lower() == "promooff"
+    code = (command.args or "").strip()
+    if not code: return await m.answer("Формат: /promooff КОД (выключить) или /promoon КОД (включить). Список: /promos")
+    if not db.set_promo_disabled(code, off): return await m.answer("Такого кода нет. Список: /promos")
+    B.alog(m, "promooff" if off else "promoon", code.upper())
+    await m.answer(f"Код {esc(code.upper())} " + ("выключен: ввести его нельзя, статистика сохранена. Включить: /promoon КОД" if off else "снова работает."))
+
 # ----- меню команд -----
 OWNER_MENU = [("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
-              ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("panelraw", "Что отвечает панель про человека"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
+              ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("sharing", "Кто делится подпиской"), ("promooff", "Выключить промокод"), ("promoon", "Включить промокод"), ("panelraw", "Что отвечает панель про человека"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
               ("top", "Топы"), ("new", "Новые люди и откуда"), ("partnerpromo", "Именной промокод партнёра"),
               ("promostat", "Статистика промокодов партнёров"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
 SUPPORT_MENU = [("tickets", "Обращения"), ("reply", "Ответить на обращение"), ("devices", "Устройства человека"), ("resetdevices", "Сбросить устройства")]
@@ -1244,6 +1414,7 @@ HELP_OWNER = (
     "/devices ID · /resetdevices ID · /devlimit ID N · /resettraffic ID\n"
     "\n<b>Новые люди и партнёры</b>\n/new [12ч|7д|30]: кто пришёл и откуда (приглашён, источник или сам)\n/newnotify on|off: сообщать о каждом новом сразу\n"
     "/partnerpromo КОД ДНИ ПАРТНЁР [МАКС] [ДАТА]: именной промокод партнёра\n/promostat [ПАРТНЁР]: сколько пришло и заплатило по его кодам\n"
-    "\n/panelraw ID: сырые ответы панели про человека (для разбора сбоев)\n\n<b>Оплата</b>\n/ykcheck: проверить ключи ЮKassa и показать причину последней ошибки счёта\n"
+    "\n/sharing [дни]: у кого подозрительно много новых устройств и блокировок\n/promooff КОД · /promoon КОД: выключить или включить промокод без удаления\n"
+    "/panelraw ID: сырые ответы панели про человека (для разбора сбоев)\n\n<b>Оплата</b>\n/ykcheck: проверить ключи ЮKassa и показать причину последней ошибки счёта\n"
     "\n<b>Бот</b>\n/maintenance on|off [текст]: режим техработ\n/funnel: воронка\n/top: топ приглашающих и платящих\n/export: пользователи в CSV")
 HELP_SUPPORT = "\n/tickets: открытые обращения\n/reply НОМЕР текст: ответить\n/close НОМЕР: закрыть\n/devices ID · /resetdevices ID\n/note ID [текст]: заметка\n/msg ID текст: сообщение человеку"

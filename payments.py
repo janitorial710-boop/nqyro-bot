@@ -21,7 +21,10 @@ LAST_ERROR = {"ts": 0, "text": ""}   # последняя ошибка созд�
 
 async def create_invoice(uid: int, plan: str, method: str, email: str | None = None, gift: bool = False, amount: int | None = None):
     topup = plan == "topup"
-    pid = db.create_topup(uid, amount, method) if topup else db.create_payment(uid, plan, method, gift)
+    if plan == "slot":
+        pid = db.create_slot_payment(uid, method)
+    else:
+        pid = db.create_topup(uid, amount, method) if topup else db.create_payment(uid, plan, method, gift)
     if config.DEV_PAY:
         return pid, None
     name = config.plan_name(plan)
@@ -30,18 +33,18 @@ async def create_invoice(uid: int, plan: str, method: str, email: str | None = N
     body = {
         "amount": amount, "capture": True,
         "confirmation": {"type": "redirect", "return_url": config.RETURN_URL},
-        "description": f"NQYRO: {'подарок, ' if gift else ''}{name}",
+        "description": f"NQYRO: {'подарок, ' if gift else ''}{name}" + (f", {config.SLOT_DAYS} дн." if plan == "slot" else ""),
         "metadata": {"payment_id": str(pid), "user_id": str(uid)},
     }
     if method == "sbp":
         body["payment_method_data"] = {"type": "sbp"}
     elif method == "card":
         body["payment_method_data"] = {"type": "bank_card"}
-    if config.AUTORENEW and not gift and not topup and method != "sbp" and db.get_user(uid)["autorenew"]:
+    if config.AUTORENEW and not gift and not topup and plan != "slot" and method != "sbp" and db.get_user(uid)["autorenew"]:
         body["save_payment_method"] = True   # карта сохранится для автопродления (СБП не сохраняется)
     if config.RECEIPT_MODE == "email" and email:
         body["receipt"] = {"customer": {"email": email}, "items": [{
-            "description": "Пополнение баланса NQYRO" if topup else f"{'Подарочная подписка' if gift else 'Подписка'} NQYRO, {name}", "quantity": "1.00", "amount": amount,
+            "description": "Пополнение баланса NQYRO" if topup else (f"Доп. устройство NQYRO, {config.SLOT_DAYS} дн." if plan == "slot" else f"{'Подарочная подписка' if gift else 'Подписка'} NQYRO, {name}"), "quantity": "1.00", "amount": amount,
             "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
     async with _session() as s:
         for attempt in (1, 2):

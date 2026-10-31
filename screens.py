@@ -174,6 +174,28 @@ def partner(u):
     L.append(f"На балансе: {db.total_balance(u):.0f} ₽. Им можно оплатить подписку. Вывод на карту: через поддержку.")
     return ("08_friends.png", "\n".join(L), kb([("Поддержка", "go:support")], [("Назад", "go:profile")]))
 
+def slot_offer(u, active):
+    price = config.SLOT_PRICE
+    bal = db.total_balance(u)
+    rows = []
+    if bal > 0:
+        rows.append([(f"Оплатить балансом · {bal:.0f} ₽" if bal >= price else f"Баланс · {bal:.0f} ₽ (не хватает {price - bal:.0f} ₽)", "slot:bal")])
+    rows += [[("СБП", "slot:pay:sbp"), ("Банковская карта", "slot:pay:card")], [("Назад", "dev:open")]]
+    return ("22_devices.png",
+        f"<b>Ещё одно устройство</b>\n\n+1 устройство к подписке на {config.SLOT_DAYS} дней: {price} ₽.\n"
+        f"Сейчас можно подключить до {config.HWID_LIMIT + active}" + (f" (докуплено: {active})" if active else "") + f".\n"
+        f"Всего можно докупить до {config.SLOT_MAX}. Каждое докупленное устройство действует свои {config.SLOT_DAYS} дней, потом лимит вернётся.",
+        kb(*rows))
+
+def slot_ok(u, until):
+    return ("06_success.png", f"<b>Устройство добавлено</b>\n\nЛимит увеличен, докупленное место действует до {d(until)}.\n"
+            "Теперь можно добавить подписку ещё на одном устройстве. Если серверов пока нет, подожди минуту и обнови подписку в приложении.",
+            kb([("Устройства", "dev:open")], [("Главное меню", "go:start")]))
+
+def slot_expiring(u):
+    return ("09_expiring.png", "<b>Докупленное устройство скоро закончится</b>\n\nЧерез пару дней лимит устройств вернётся к обычному. "
+            "Если нужно оставить, докупи ещё раз.", kb([("Докупить устройство", "slot:buy")], [("Устройства", "dev:open")]))
+
 def pay_dev(u, pid):
     return ("05_payment.png", "<b>Тестовый режим</b>\n\nПлатёжный сервис не подключён. Нажми кнопку, чтобы имитировать оплату.",
             kb([("Имитировать оплату", f"devpay:{pid}")], [("Назад", "go:plans")]))
@@ -190,7 +212,7 @@ def profile(u):
     import time
     active = u["sub_until"] > time.time()
     text = (f"<b>Профиль</b>\n\nСтатус: {'активна' if active else 'не активна'}\n"
-            f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до 3\n"
+            f"Действует до: {d(u['sub_until']) if u['sub_until'] else '-'}\nУстройства: до {config.HWID_LIMIT + db.slots_active(u['id'])}\n"
             f"Баланс: {db.total_balance(u):.0f} ₽"
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
@@ -261,5 +283,6 @@ def promo_bad(u, reason):
     t = {"not_found": ("Код не найден", "Проверь, нет ли опечатки, и попробуй ещё раз."),
          "already": ("Код уже использован", "Этот промокод можно применить только один раз на аккаунт."),
          "exhausted": ("Промокод закончился", "У этого кода не осталось активаций."),
-         "expired": ("Промокод истёк", "Срок действия этого кода закончился.")}[reason]
+         "expired": ("Промокод истёк", "Срок действия этого кода закончился."),
+         "off": ("Промокод отключён", "Сейчас этот код не действует.")}[reason]
     return ("11_error.png", f"<b>{t[0]}</b>\n\n{t[1]}", kb([("Ввести ещё раз", "promo")], [("Назад", "go:start")]))

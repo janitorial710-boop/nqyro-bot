@@ -232,6 +232,36 @@ async def hwid_delete(uid: int, hwid: str):
     u = await _need_user(uid)
     await _ok("POST", "/api/hwid/devices/delete", json=_who_body(u, hwid=hwid))
 
+async def hwid_all(page: int = 500, max_pages: int = 40):
+    """Все устройства всех людей одним списком (для слежения за новыми). Бросает исключение, если панель не ответила."""
+    out, start = [], 0
+    for _ in range(max_pages):
+        data = await _ok("GET", f"/api/hwid/devices?size={page}&start={start}")
+        devs = (data.get("devices") if isinstance(data, dict) else data) or []
+        out += devs
+        if len(devs) < page: break
+        start += page
+    return out
+
+async def tg_by_ident(ident):
+    """Telegram ID человека по id (или uuid) пользователя панели. None, если не удалось определить."""
+    import re
+    st, data = await _call("GET", f"/api/users/{ident}")
+    u = _as_user(data) if st == 200 else None
+    if not isinstance(u, dict): return None
+    m = re.fullmatch(r"tg_(\d+)", str(u.get("username") or ""))
+    if m: return int(m.group(1))
+    t = u.get("telegramId")
+    return int(t) if isinstance(t, (int, str)) and str(t).isdigit() else None
+
+async def apply_limit(uid: int):
+    """Выставляет в панели лимит устройств: HWID_LIMIT плюс действующие докупленные слоты."""
+    want = config.HWID_LIMIT + db.slots_active(uid)
+    u = await _need_user(uid)
+    if (u.get("hwidDeviceLimit") or 0) != want:
+        await _patch_user(u, {"hwidDeviceLimit": want})
+    return want
+
 async def hwid_limit(uid: int):
     """Текущий лимит устройств человека в панели (или HWID_LIMIT из настроек, если панель не сказала)."""
     u = await _need_user(uid)

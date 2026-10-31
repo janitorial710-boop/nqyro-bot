@@ -600,6 +600,10 @@ async def profile_extra(uid, scr):
     name, text, markup = scr
     extra = []
     u = db.get_user(uid)
+    if u["sub_until"] > time.time():
+        n = int((u["sub_until"] - time.time() + 86399) // 86400)
+        w = "день" if n % 10 == 1 and n % 100 != 11 else ("дня" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дней")
+        extra.append(f"Осталось: {n} {w}")
     if config.PANEL_URL and u["sub_until"] > 0:
         gb = await _traffic_gb(uid)
         if gb is not None: extra.append(f"Трафик: {gb:.1f} ГБ")

@@ -67,7 +67,12 @@ CONVERT_MIN = int(-(-DAY_RATE // 1))       # минимум для обмена:
 def plan_name(key):
     """Название тарифа для отображения; 'topup' = пополнение баланса."""
     if key in PLANS: return PLANS[key][2]
-    return {"topup": "пополнение баланса", "days": "дни подписки (с баланса)"}.get(key, str(key))
+    return {"topup": "пополнение баланса", "days": "дни подписки (с баланса)", "slot": "доп. устройство"}.get(key, str(key))
+
+# --- Докупка слота устройства ---
+SLOT_PRICE = int(os.getenv("SLOT_PRICE", "99"))     # цена +1 устройства за SLOT_DAYS дней, ₽ (0 = докупка выключена)
+SLOT_DAYS = int(os.getenv("SLOT_DAYS", "30"))
+SLOT_MAX = int(os.getenv("SLOT_MAX", "3"))          # сколько устройств можно докупить сверх HWID_LIMIT
 
 # --- Вывод реферальных денег и прочее (extras.py) ---
 PAYOUT_MIN = int(os.getenv("PAYOUT_MIN", "250"))                      # минимальная сумма вывода, ₽

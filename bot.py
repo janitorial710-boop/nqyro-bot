@@ -169,6 +169,9 @@ def done_screen(uid, until, code, plan=None):
     """Экран после оплаты: пополнение баланса, подарок (код) или обычная подписка."""
     u = db.get_user(uid)
     if plan == "topup": return screens.topup_ok(u)
+    if plan == "slot":
+        _s = db.con.execute("SELECT MAX(until) FROM slots WHERE user_id=?", (uid,)).fetchone()[0] or int(time.time())
+        return screens.slot_ok(u, _s)
     return screens.gift_ready(u, code) if code else screens.success(u, until)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -178,6 +181,9 @@ async def deliver_paid(pid):
     if not res: return False
     uid, plan, until, code = res
     if until: await panel.set_expiry(uid, until)
+    if plan == "slot":
+        try: await panel.apply_limit(uid)
+        except Exception: logging.exception("apply_limit after slot payment uid=%s", uid)   # цикл проверки добьёт позже
     scr = done_screen(uid, until, code, plan)
     if code: scr = await features.gift_after(uid, code, plan, scr)   # подарок «по @нику» сразу активируется у друга
     name, text, markup = scr
@@ -674,6 +680,8 @@ def _refund_effects(p, info):
                 ("тестовый платёж: деньги не возвращаются" if (config.DEV_PAY or not p["yk_id"]) else "деньги вернутся через ЮKassa на тот же способ оплаты"))]
     if p["plan"] == "topup":
         effects.append(f"с основного баланса человека спишется {info['topup']:.0f} ₽ (пополнение вместе с бонусом)")
+    elif p["plan"] == "slot":
+        effects.append("докупленное устройство уберётся из подписки, лимит в панели уменьшится")
     elif p["gift"]:
         effects.append("подарочный код будет удалён" + (f" ({info['gift_code']})" if info.get("gift_code") else ""))
     else:
@@ -721,7 +729,10 @@ async def refund_run(pid, actor):
         st, info = db.apply_refund(pid)
         if st != "ok":
             return "Платёж уже изменился, пока шёл возврат. Если деньги в ЮKassa вернулись, проверь платёж вручную в карточке человека."
-        if not p["gift"] and p["plan"] != "topup":
+        if p["plan"] == "slot":
+            try: await panel.apply_limit(p["user_id"])
+            except Exception: logging.exception("apply_limit after slot refund")
+        elif not p["gift"] and p["plan"] != "topup":
             await panel.set_expiry(p["user_id"], info["new_until"])
         alog(actor, "refund", pid, f"{p['amount']} ₽, человек {p['user_id']}")
         return "Готово. Возврат выполнен.\n- " + "\n- ".join(effects) + manual_note
@@ -993,7 +1004,7 @@ async def cmd_promos(m: Message):
                 else f"скидка {r['value']:.0f}%" if r["kind"] == "percent" else f"скидка {r['value']:.0f} ₽")
         _s = db.src_get(r["src"]) if r["src"] else None
         lines.append(f"<code>{r['code']}</code>: {what}, использовано {r['used']}" + (f" из {r['max_uses']}" if r['max_uses'] else "") + tail
-                     + (f" · партнёр: {html.escape(_s['title'])}" if _s else ""))
+                     + (f" · партнёр: {html.escape(_s['title'])}" if _s else "") + (" · ВЫКЛЮЧЕН" if r["disabled"] else ""))
     await send_lines(m, f"<b>Промокоды ({len(rows)})</b>", lines)
 
 @dp.message(Command("stats"), can_stats)
@@ -1164,7 +1175,7 @@ def source_card(code, viewer):
           f"Партнёру начислено: {st['earned']:.0f} ₽"]
     for pr in db.src_promos(code):
         L.append(f"Промокод <code>{pr['code']}</code> (+{pr['days']} дн.): активаций {pr['used']}" + (f" из {pr['max_uses']}" if pr["max_uses"] else "")
-                 + f", оплатили {pr['payers']} на {pr['revenue']:.0f} ₽")
+                 + f", оплатили {pr['payers']} на {pr['revenue']:.0f} ₽" + (" · ВЫКЛЮЧЕН" if pr["off"] else ""))
     rows = []
     if viewer in config.ADMIN_IDS:
         rows += [[("Название", f"src:ren:{code}"), ("% партнёру", f"src:pct:{code}")],

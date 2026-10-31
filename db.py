@@ -87,7 +87,7 @@ for _sql in ("ALTER TABLE users ADD COLUMN disc_until INTEGER DEFAULT 0",    # �
 
 def first_purchase(uid):
     """True, если человек ещё ни разу не оплачивал подписку (подарки не считаются)."""
-    return con.execute("SELECT 1 FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan!='topup' LIMIT 1", (uid,)).fetchone() is None
+    return con.execute("SELECT 1 FROM payments WHERE user_id=? AND status='paid' AND COALESCE(gift,0)=0 AND plan NOT IN ('topup','slot') LIMIT 1", (uid,)).fetchone() is None
 
 def active_sale(now=None):
     now = now or int(time.time())
@@ -163,6 +163,7 @@ def use_promo(uid, code):
     code = code.strip().upper()
     p = con.execute("SELECT * FROM promo_codes WHERE code=?", (code,)).fetchone()
     if not p: return ("not_found", 0, 0)
+    if p["disabled"]: return ("off", 0, 0)
     if (p["expires"] or 0) and p["expires"] < time.time(): return ("expired", 0, 0)
     if p["max_uses"] and p["used"] >= p["max_uses"]: return ("exhausted", 0, 0)
     try:
@@ -222,7 +223,7 @@ def src_promos(code):
     for r in con.execute("SELECT * FROM promo_codes WHERE src=? ORDER BY created DESC", (code,)).fetchall():
         pay = con.execute("SELECT COUNT(DISTINCT p.user_id), COALESCE(SUM(p.amount),0) FROM payments p JOIN promo_uses pu ON pu.user_id=p.user_id "
                           "WHERE pu.code=? AND p.status='paid' AND p.method!='balance' AND p.plan!='topup'", (r["code"],)).fetchone()
-        out.append({"code": r["code"], "days": r["days"], "max_uses": r["max_uses"], "used": r["used"], "expires": r["expires"] or 0,
+        out.append({"code": r["code"], "days": r["days"], "max_uses": r["max_uses"], "used": r["used"], "expires": r["expires"] or 0, "off": bool(r["disabled"]),
                     "payers": pay[0], "revenue": pay[1]})
     return out
 
@@ -241,6 +242,51 @@ def blocked_list(uid):
 
 def blocked_users():
     return [r[0] for r in con.execute("SELECT DISTINCT user_id FROM blocked_devices")]
+
+con.executescript("""
+CREATE TABLE IF NOT EXISTS slots(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, until INTEGER, payment_id INTEGER, notified INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS seen_devices(user_id INTEGER, hwid TEXT, first_seen INTEGER, PRIMARY KEY(user_id, hwid));
+""")
+try:
+    con.execute("ALTER TABLE promo_codes ADD COLUMN disabled INTEGER DEFAULT 0"); con.commit()   # 1 = код выключен, но не удалён
+except sqlite3.OperationalError:
+    pass
+
+def set_promo_disabled(code, flag):
+    cur = con.execute("UPDATE promo_codes SET disabled=? WHERE code=?", (1 if flag else 0, code.strip().upper())); con.commit()
+    return cur.rowcount
+
+def slots_active(uid):
+    return con.execute("SELECT COUNT(*) FROM slots WHERE user_id=? AND until>?", (uid, int(time.time()))).fetchone()[0]
+
+def slot_users():
+    """Кому нужно сверить лимит устройств в панели: у кого есть активные слоты или они кончились недавно."""
+    return [r[0] for r in con.execute("SELECT DISTINCT user_id FROM slots WHERE until>?", (int(time.time()) - 3 * 86400,))]
+
+def grant_slot(uid, pid=None):
+    until = int(time.time()) + config.SLOT_DAYS * 86400
+    con.execute("INSERT INTO slots(user_id,until,payment_id) VALUES(?,?,?)", (uid, until, pid)); con.commit()
+    return until
+
+def create_slot_payment(uid, method):
+    get_user(uid)
+    cur = con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift) VALUES(?,?,?,?,?,?,0)",
+                      (uid, "slot", config.SLOT_PRICE, method, "pending", int(time.time())))
+    con.commit(); return cur.lastrowid
+
+def pay_slot_with_balance(uid):
+    """Покупка слота с баланса (сначала реферальный, потом основной). Возвращает дату окончания слота или None, если денег не хватает."""
+    u = get_user(uid); price = config.SLOT_PRICE
+    if total_balance(u) < price: return None
+    from_ref = min(u["balance"] or 0, price); from_main = price - from_ref
+    cur = con.execute("UPDATE users SET balance=balance-?, topup=topup-? WHERE id=? AND balance>=? AND topup>=?",
+                      (from_ref, from_main, uid, from_ref, from_main - 1e-9))
+    if cur.rowcount == 0:
+        con.rollback(); return None
+    ins = con.execute("INSERT INTO payments(user_id,plan,amount,method,status,created,gift) VALUES(?,?,?,?,?,?,0)",
+                      (uid, "slot", price, "balance", "paid", int(time.time())))
+    con.commit()
+    return grant_slot(uid, ins.lastrowid)
 
 def new_users(since=0, limit=30):
     """Новые люди: за период (since — unix-время) или просто последние limit."""
@@ -346,6 +392,9 @@ def complete_payment(pid):
         add = (p["amount"] or 0) + (p["bonus"] or 0)
         con.execute("UPDATE users SET topup=COALESCE(topup,0)+? WHERE id=?", (add, p["user_id"])); con.commit()
         return p["user_id"], "topup", None, None
+    if p["plan"] == "slot":   # докупка устройства: слот на SLOT_DAYS дней
+        grant_slot(p["user_id"], pid)
+        return p["user_id"], "slot", None, None
     code = None
     if p["gift"]:
         code, until = make_gift_code(p["plan"]), None
@@ -546,6 +595,8 @@ def refund_plan(pid):
         if (get_user(p["user_id"])["topup"] or 0) < add - 1e-9:
             return "topup_spent", p, {}
         return "ok", p, {"topup": add}
+    if p["plan"] == "slot":
+        return "ok", p, {"slot": True}
     if p["gift"]:
         if p["code"] and con.execute("SELECT 1 FROM promo_uses WHERE code=?", (p["code"],)).fetchone():
             return "gift_used", p, {}
@@ -568,6 +619,12 @@ def apply_refund(pid):
     if cur.rowcount == 0: return "not_paid", {}
     if p["plan"] == "topup":
         con.execute("UPDATE users SET topup=MAX(0,COALESCE(topup,0)-?) WHERE id=?", (info["topup"], p["user_id"])); con.commit()
+        return "ok", info
+    if p["plan"] == "slot":
+        con.execute("DELETE FROM slots WHERE payment_id=?", (pid,))
+        if p["method"] == "balance":
+            con.execute("UPDATE users SET topup=COALESCE(topup,0)+? WHERE id=?", (p["amount"], p["user_id"]))
+        con.commit()
         return "ok", info
     if p["gift"]:
         if info.get("gift_code"): con.execute("DELETE FROM promo_codes WHERE code=?", (info["gift_code"],))
