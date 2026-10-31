@@ -163,6 +163,22 @@ async def dev_screen(uid, note=""):
 
 @router.callback_query(F.data.startswith("dev:rm:"))
 async def cb_dev_rm(c: CallbackQuery):
+    """Первое нажатие «Отвязать»: просим подтвердить. Само удаление и блокировка делаются в cb_dev_rmy."""
+    uid = c.from_user.id; h = c.data.split(":", 2)[2]
+    try:
+        hit = next((x for x in await panel.hwid_list(uid) if _dh(x.get("hwid")) == h), None)
+    except Exception as e:
+        logging.warning("device confirm uid=%s: %s", uid, e)
+        return await answer_cb(c, "Не получилось открыть устройство. Попробуй ещё раз или напиши в поддержку." + _why(uid, e), True)
+    await answer_cb(c)
+    if not hit:
+        return await B.show(c, await dev_screen(uid, "Этого устройства уже нет в списке."))
+    await B.show(c, ("22_devices.png", f"<b>Заблокировать устройство?</b>\n\n{esc(_dev_name(hit))}\n\n"
+                     "Оно отвяжется от подписки и не сможет снова подключиться, пока ты сам не разрешишь его в списке «Заблокированные».",
+                     kb([("Да, заблокировать", f"dev:rmy:{h}")], [("Отмена", "dev:open")])))
+
+@router.callback_query(F.data.startswith("dev:rmy:"))
+async def cb_dev_rmy(c: CallbackQuery):
     uid = c.from_user.id; h = c.data.split(":", 2)[2]
     last = int(db.kv_get(f"devrm:{uid}") or 0)
     if time.time() - last < 5:

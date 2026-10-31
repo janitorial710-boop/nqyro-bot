@@ -75,6 +75,7 @@ def plans(u):
         + (f"\n\nТвоя скидка ({dl}) уже учтена в цене на кнопках." if dl else ""),
         kb([(f"1 месяц · {_rub(pr['1'])} ₽", "buy:1")], [(f"3 месяца · {_rub(pr['3'])} ₽", "buy:3")], [(f"12 месяцев · {_rub(pr['12'])} ₽", "buy:12")],
            [("Пополнить баланс", "go:topup"), ("Подарить подписку", "go:gift")],
+           *([[("Обменять баланс на дни", "go:convert")]] if db.convert_quote(u)[0] else []),
            [("Назад", "go:start")]))
 
 def gift_plans(u):
@@ -129,9 +130,9 @@ def convert(u):
     head = (f"<b>Обмен баланса на дни</b>\n\nНа балансе: {bal:.0f} ₽\nКурс: 1 день = {config.DAY_RATE:.1f} ₽ (как в тарифе на месяц)\n\n")
     if not rub:
         return ("07_profile.png", head + f"Для обмена нужно хотя бы {config.CONVERT_MIN} ₽ (это 1 день). Пополни баланс на любую сумму.",
-                kb([("Пополнить баланс", "go:topup")], [("Назад", "go:profile")]))
+                kb([("Пополнить баланс", "go:topup")], [("Назад", "go:plans")]))
     return ("07_profile.png", head + f"Обменяем {rub} ₽ → {_dfmt(secs)} подписки. Они добавятся к текущей дате окончания.\n\nДлинные тарифы выгоднее: там день дешевле.",
-            kb([(f"Обменять {rub} ₽ → {_dfmt(secs)}", "cvt:go")], [("Тарифы со скидкой", "go:plans")], [("Назад", "go:profile")]))
+            kb([(f"Обменять {rub} ₽ → {_dfmt(secs)}", "cvt:go")], [("Назад", "go:plans")]))
 
 def converted(u, rub, secs, until):
     return ("06_success.png", f"<b>Готово</b>\n\nСписали {rub} ₽, добавили {_dfmt(secs)}.\nПодписка активна до {d(until)}.",
@@ -219,7 +220,6 @@ def profile(u):
         kb([("Подключиться", "go:connect"), ("Устройства", "dev:open")],
            [("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")],
            [("Вывести деньги", "wd:start"), ("Промокод", "promo")],
-           *([[("Обменять баланс на дни", "go:convert")]] if db.convert_quote(u)[0] else []),
            *([[("Автопродление", "ar:open")]] if config.AUTORENEW else []),
            *([[("Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []),
            [("Поддержка", "go:support")],
