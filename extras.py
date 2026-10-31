@@ -346,7 +346,7 @@ def wd_screen(uid):
         L += ["", f"Пока меньше минимума ({_min(uid)} ₽). Приглашай друзей, бонус копится."]
     else:
         rows.append([("Карта", "wd:m:card"), ("СБП", "wd:m:sbp")]); rows.append([("USDT", "wd:m:usdt")])
-    rows.append([("Назад", "go:start")])
+    rows.append([("Назад", "go:friends")])
     return ("16_withdraw.png", "\n".join(L), kb(*rows))
 
 @router.callback_query(F.data == "wd:start")

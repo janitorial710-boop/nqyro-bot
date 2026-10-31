@@ -90,7 +90,7 @@ def ar_screen(u):
         L += ["", "Чтобы привязать карту: включи автопродление и оплати подписку банковской картой. Карта сохранится у платёжного сервиса, мы её номер не видим."]
     rows = [[("Выключить" if on else "Включить", "ar:off" if on else "ar:on")]]
     if card: rows.append([("Отвязать карту", "ar:unlink")])
-    rows.append([("Назад", "go:profile")])
+    rows.append([("Назад", "go:plans")])
     return ("07_profile.png", "\n".join(L), kb(*rows))
 
 @router.callback_query(F.data.in_({"ar:open", "ar:on", "ar:off", "ar:unlink"}))

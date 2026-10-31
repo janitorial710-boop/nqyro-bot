@@ -1235,7 +1235,7 @@ async def _notify_partner(owner_id, code):
     if not (s and owner_id and s["percent"]): return
     try:
         await bot.send_message(owner_id, f"Тебе открыта партнёрская ссылка «{html.escape(s['title'])}»: {s['percent']:.0f}% с каждой оплаты пришедших по ней людей.\n\n"
-                                         f"<code>{src_link(code)}</code>\n\nСтатистика: Профиль → Партнёрка (или /partner).")
+                                         f"<code>{src_link(code)}</code>\n\nСтатистика: Друзья → Партнёрка (или /partner).")
     except Exception:
         logging.warning("партнёру %s не отправилось уведомление", owner_id)
 

@@ -54,7 +54,7 @@ def connect_error(u):
     return ("03_connect.png",
         "<b>Не удалось получить ссылку</b>\n\nСервер подключения не ответил. Обычно это проходит за минуту. "
         "Нажми «Повторить»; если не получится, напиши в поддержку, подписка при этом не пропадёт.",
-        kb([("Повторить", "go:connect")], [("Поддержка", "go:support"), ("Назад", "go:start")]))
+        kb([("Повторить", "go:connect")], [("Поддержка", "go:support")], [("Назад", "go:start")]))
 
 def _rub(n): return f"{n:,}".replace(",", " ")
 
@@ -70,12 +70,13 @@ def plans(u):
     sale = db.active_sale()
     pr = {k: db.price_for(u, k) for k in config.PLANS}
     return ("04_plans.png",
-        "<b>Выбери тариф</b>\n\n1 месяц: 249 ₽\n3 месяца: 599 ₽ (−20%)\n12 месяцев: 1 990 ₽ (−33%)\n\nДо 3 устройств на одну подписку.\nХочешь не на месяц, а на любой срок? Пополни баланс на любую сумму и обменяй на дни."
+        "<b>Выбери тариф</b>\n\n" + (f"На балансе: {db.total_balance(u):.0f} ₽\n\n" if db.total_balance(u) > 0 else "") + "1 месяц: 249 ₽\n3 месяца: 599 ₽ (−20%)\n12 месяцев: 1 990 ₽ (−33%)\n\nДо 3 устройств на одну подписку.\nХочешь не на месяц, а на любой срок? Пополни баланс на любую сумму и обменяй на дни."
         + (f"\n\nАкция «{sale['title']}» до {d(sale['end'])}." if sale and sale["title"] else "")
         + (f"\n\nТвоя скидка ({dl}) уже учтена в цене на кнопках." if dl else ""),
         kb([(f"1 месяц · {_rub(pr['1'])} ₽", "buy:1")], [(f"3 месяца · {_rub(pr['3'])} ₽", "buy:3")], [(f"12 месяцев · {_rub(pr['12'])} ₽", "buy:12")],
            [("Пополнить баланс", "go:topup"), ("Подарить подписку", "go:gift")],
            *([[("Обменять баланс на дни", "go:convert")]] if db.convert_quote(u)[0] else []),
+           *([[("Автопродление", "ar:open")]] if config.AUTORENEW else []),
            [("Назад", "go:start")]))
 
 def gift_plans(u):
@@ -146,7 +147,7 @@ def topup(u):
             + (f"Бонус к пополнению: +{bonus}%\n" if bonus else "")
             + f"\nВыбери сумму или пришли свою (от {config.TOPUP_MIN} до {config.TOPUP_MAX} ₽). "
               f"Любую сумму можно обменять на дни: 1 день = {config.DAY_RATE:.1f} ₽. Или потратить на тариф.")
-    return ("07_profile.png", text, kb(*rows, [("Назад", "go:profile")]))
+    return ("07_profile.png", text, kb(*rows, [("Назад", "go:plans")]))
 
 def topup_pay(u, amount):
     bonus = int(amount * config.TOPUP_BONUS_PERCENT / 100)
@@ -158,13 +159,13 @@ def topup_pay(u, amount):
 def topup_ok(u):
     rub, secs = db.convert_quote(u)
     return ("06_success.png", f"<b>Баланс пополнен</b>\n\nТеперь на балансе: {db.total_balance(u):.0f} ₽.\nМожно обменять на дни или оплатить тариф в один клик.",
-            kb(*([[(f"Обменять на дни · {_dfmt(secs)}", "go:convert")]] if rub else []), [("Тарифы", "go:plans")], [("Профиль", "go:profile")]))
+            kb(*([[(f"Обменять на дни · {_dfmt(secs)}", "go:convert")]] if rub else []), [("Тарифы", "go:plans")], [("Главное меню", "go:start")]))
 
 def partner(u):
     srcs = db.partner_sources(u["id"])
     if not srcs:
         return ("08_friends.png", "<b>Партнёрка</b>\n\nУ тебя пока нет партнёрских ссылок. Хочешь зарабатывать на подписках, напиши в поддержку.",
-                kb([("Поддержка", "go:support")], [("Назад", "go:profile")]))
+                kb([("Поддержка", "go:support")], [("Назад", "go:friends")]))
     L = ["<b>Партнёрка</b>\n"]
     for s in srcs:
         st = db.src_stats(s["code"])
@@ -173,7 +174,7 @@ def partner(u):
                  f"<code>https://t.me/{config.BOT_USERNAME}?start=src_{s['code']}</code>\n"
                  + "".join(f"Промокод <code>{p['code']}</code>: активаций {p['used']}, оплатили {p['payers']}\n" for p in db.src_promos(s["code"])))
     L.append(f"На балансе: {db.total_balance(u):.0f} ₽. Им можно оплатить подписку. Вывод на карту: через поддержку.")
-    return ("08_friends.png", "\n".join(L), kb([("Поддержка", "go:support")], [("Назад", "go:profile")]))
+    return ("08_friends.png", "\n".join(L), kb([("Поддержка", "go:support")], [("Назад", "go:friends")]))
 
 def slot_offer(u, active):
     price = config.SLOT_PRICE
@@ -218,11 +219,6 @@ def profile(u):
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
         kb([("Подключиться", "go:connect"), ("Устройства", "dev:open")],
-           [("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")],
-           [("Вывести деньги", "wd:start"), ("Промокод", "promo")],
-           *([[("Автопродление", "ar:open")]] if config.AUTORENEW else []),
-           *([[("Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []),
-           [("Поддержка", "go:support")],
            [("Назад", "go:start")]))
 
 def friends(u):
@@ -232,7 +228,9 @@ def friends(u):
         f"<b>Приглашай друзей</b>\n\nДруг получает 5 дней бесплатно, а ты {config.REF_PERCENT}% с каждой его оплаты на свой баланс.\n\n"
         f"Приглашено: {n} · Заработано: {earned:.0f} ₽\nНа реферальном балансе: {bal:.0f} ₽\n"
         f"Им можно оплатить подписку.\n\nТвоя ссылка:\n<code>{link}</code>",
-        kb([("Оплатить подписку балансом", "go:plans")], [("Вывести деньги", "wd:start")], [("Назад", "go:start")]))
+        kb([("Оплатить подписку балансом", "go:plans")], [("Вывести деньги", "wd:start")],
+           *([[("Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []),
+           [("Назад", "go:start")]))
 
 def expiring(u):
     return ("09_expiring.png", "<b>Подписка заканчивается через 3 дня</b>\n\nПродли сейчас, и доступ не прервётся.",
