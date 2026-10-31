@@ -116,6 +116,10 @@ async def cmd_maintenance(m: Message, command: CommandObject):
 def _dev_name(d_):
     return " ".join(x for x in (d_.get("platform"), d_.get("deviceModel"), d_.get("osVersion")) if x) or "без названия"
 
+def _why(uid, e):
+    """Причина сбоя для всплывающего уведомления: видна только владельцу."""
+    return (f"\n\nПричина: {e}"[:150]) if uid in config.ADMIN_IDS else ""
+
 def _dh(hwid):
     """Короткая метка устройства для кнопки (в callback_data нельзя длинный hwid)."""
     import hashlib
@@ -137,17 +141,21 @@ async def dev_screen(uid, note=""):
             text = ("<b>Устройства</b>\n\nНе получилось получить список устройств: сервер подключения не ответил. "
                     "Нажми «Обновить» через минуту. Если не пройдёт, напиши в поддержку.")
         if uid in config.ADMIN_IDS: text += f"\n\nПричина (видно только тебе): {esc(e)}"
-        return ("22_devices.png", text, kb([("Обновить", "dev:open")], [("Назад", "go:connect")]))
+        return ("22_devices.png", text, kb([("Обновить", "dev:open")], [("Назад", "go:profile")]))
     try: limit = await panel.hwid_limit(uid)
     except Exception: limit = config.HWID_LIMIT
     L = [f"<b>Устройства: {len(devs)} из {limit}</b>", ""]
     L += [f"{i}. {esc(_dev_name(x))}" + (f" · с {_dev_since(x)}" if _dev_since(x) else "") for i, x in enumerate(devs, 1)] or ["Пока ни одно устройство не подключено."]
-    L += ["", "Чтобы убрать чужое или старое устройство, нажми на него ниже. Оно потеряет доступ, а место освободится.",
-              "Если подпиской пользуется тот, кому ты её не давал, нажми «Новая ссылка»: старая перестанет работать у всех."]
+    L += ["", "Чтобы убрать чужое или старое устройство, нажми на него ниже. Оно отвяжется и будет заблокировано: снова подключиться оно не сможет, пока ты сам не разрешишь.",
+              "Если подпиской пользуется тот, кому ты её не давал, напиши в поддержку: мы выпустим новую ссылку."]
     if note: L = [note, ""] + L
     rows = [[(f"Отвязать {i}. {_dev_name(x)[:30]}", f"dev:rm:{_dh(x.get('hwid'))}")] for i, x in enumerate(devs[:10], 1)]
-    rows += [[("Сбросить все", "dev:ask"), ("Новая ссылка", "dev:nl")]] if devs else [[("Новая ссылка", "dev:nl")]]
-    rows += [[("Обновить", "dev:open")], [("Назад", "go:connect")]]
+    blocked = db.blocked_list(uid)
+    if blocked:
+        L += ["", "<b>Заблокированные</b>: они не смогут снова подключиться, пока ты не разрешишь:"] + [f"• {esc(b_['name'] or 'устройство')}" for b_ in blocked[:10]]
+        rows += [[(f"Разрешить: {(b_['name'] or 'устройство')[:30]}", f"dev:al:{_dh(b_['hwid'])}")] for b_ in blocked[:10]]
+    rows += [[("Сбросить все", "dev:ask"), ("Обновить", "dev:open")]] if devs else [[("Обновить", "dev:open")]]
+    rows += [[("Назад", "go:profile")]]
     return ("22_devices.png", "\n".join(L), kb(*rows))
 
 @router.callback_query(F.data.startswith("dev:rm:"))
@@ -156,16 +164,49 @@ async def cb_dev_rm(c: CallbackQuery):
     last = int(db.kv_get(f"devrm:{uid}") or 0)
     if time.time() - last < 5:
         return await answer_cb(c, "Подожди пару секунд.", False)
+    hit = None
     try:
         devs = await panel.hwid_list(uid)
         hit = next((x for x in devs if _dh(x.get("hwid")) == h), None)
-        if hit: await panel.hwid_delete(uid, hit["hwid"])
+        if hit:
+            db.block_device(uid, hit["hwid"], _dev_name(hit))   # сначала в чёрный список: даже если удаление не пройдёт, цикл проверки добьёт
+            await panel.hwid_delete(uid, hit["hwid"])
     except Exception as e:
         logging.warning("device remove uid=%s: %s", uid, e)
-        return await answer_cb(c, "Не получилось отвязать. Попробуй ещё раз или напиши в поддержку.", True)
+        if hit: db.unblock_device(uid, hit["hwid"])   # не вышло отвязать: не держим его в чёрном списке, чтобы сообщение об ошибке не врало
+        return await answer_cb(c, "Не получилось отвязать. Попробуй ещё раз или напиши в поддержку." + _why(uid, e), True)
     db.kv_set(f"devrm:{uid}", str(int(time.time())))
     await answer_cb(c, "Готово" if hit else "Это устройство уже отвязано")
-    await B.show(c, await dev_screen(uid, f"Отвязано: {esc(_dev_name(hit))}." if hit else "Это устройство уже было отвязано."))
+    await B.show(c, await dev_screen(uid, f"Отвязано и заблокировано: {esc(_dev_name(hit))}. Если оно снова появится, бот уберёт его в течение минуты." if hit else "Это устройство уже было отвязано."))
+
+@router.callback_query(F.data.startswith("dev:al:"))
+async def cb_dev_allow(c: CallbackQuery):
+    uid = c.from_user.id; h = c.data.split(":", 2)[2]
+    hit = next((b_ for b_ in db.blocked_list(uid) if _dh(b_["hwid"]) == h), None)
+    if hit: db.unblock_device(uid, hit["hwid"])
+    await answer_cb(c, "Разрешено" if hit else "Уже разрешено")
+    await B.show(c, await dev_screen(uid, f"Разрешено: {esc(hit['name'] or 'устройство')}. Добавь подписку на нём в приложении заново." if hit else "Это устройство уже разрешено."))
+
+async def block_pass():
+    """Один проход: если заблокированное устройство снова появилось в панели, отвязывает его. Возвращает, сколько убрано."""
+    n = 0
+    for uid in db.blocked_users():
+        try:
+            bad = {b_["hwid"] for b_ in db.blocked_list(uid)}
+            for d_ in await panel.hwid_list(uid):
+                if str(d_.get("hwid")) in bad:
+                    await panel.hwid_delete(uid, d_["hwid"]); n += 1; logging.info("blocked device removed again uid=%s", uid)
+        except Exception as e:
+            logging.warning("block_loop uid=%s: %s", uid, e)
+        await asyncio.sleep(0.3)
+    return n
+
+async def block_loop():
+    """Раз в минуту следит за заблокированными устройствами."""
+    while True:
+        await asyncio.sleep(60)
+        try: await block_pass()
+        except Exception: logging.exception("block_loop")
 
 @router.callback_query(F.data == "dev:nl")
 async def cb_dev_nl(c: CallbackQuery):
@@ -185,13 +226,17 @@ async def cb_dev_nlyes(c: CallbackQuery):
         await panel.revoke_sub(uid)
     except Exception as e:
         logging.warning("revoke uid=%s: %s", uid, e)
-        return await answer_cb(c, "Не получилось выпустить ссылку. Напиши в поддержку.", True)
+        return await answer_cb(c, "Не получилось выпустить ссылку. Напиши в поддержку." + _why(uid, e), True)
+    reset_err = None
     try: await panel.hwid_reset(uid)
-    except Exception: logging.warning("hwid reset after revoke failed uid=%s", uid)
+    except Exception as e:
+        reset_err = e; logging.warning("hwid reset after revoke failed uid=%s: %s", uid, e)
     db.kv_set(f"newlink:{uid}", str(int(time.time())))
     await answer_cb(c, "Готово")
-    await B.show(c, ("22_devices.png", "<b>Новая ссылка выпущена</b>\n\nСтарая больше не работает, устройства отвязаны. "
-                     "Открой «Подключиться» и добавь подписку в приложение заново.",
+    await B.show(c, ("22_devices.png", "<b>Новая ссылка выпущена</b>\n\nСтарая больше не работает. "
+                     + ("Устройства отвязать не получилось: открой «Устройства» и убери их вручную. " if reset_err else "Устройства отвязаны. ")
+                     + "Открой «Подключиться» и добавь подписку в приложение заново."
+                     + (f"\n\nПричина (видно только тебе): {esc(reset_err)}" if reset_err and uid in config.ADMIN_IDS else ""),
                      kb([("Подключиться", "go:connect")], [("Назад", "dev:open")])))
 
 @router.callback_query(F.data == "dev:open")
@@ -216,7 +261,7 @@ async def cb_dev_yes(c: CallbackQuery):
         await panel.hwid_reset(uid)
     except Exception as e:
         logging.warning("device reset uid=%s: %s", uid, e)
-        return await answer_cb(c, "Не получилось сбросить. Напиши в поддержку.", True)
+        return await answer_cb(c, "Не получилось сбросить. Напиши в поддержку." + _why(uid, e), True)
     db.kv_set(f"devreset:{uid}", str(int(time.time())))
     await answer_cb(c, "Готово")
     await B.show(c, await dev_screen(uid, "Устройства отвязаны. Обнови подписку в приложении."))
@@ -462,10 +507,10 @@ async def cmd_payoutno(m: Message, command: CommandObject):
 FAQ = [
     ("Не подключается",
      "1. Обнови подписку в приложении (кнопка обновления рядом с подпиской).\n2. Проверь, что на телефоне верные дата и время.\n"
-     "3. Если удалял подписку и добавлял заново, открой «Подключиться → Устройства» и нажми «Сбросить все».\n"
+     "3. Если удалял подписку и добавлял заново, открой «Профиль → Устройства» и нажми «Сбросить все».\n"
      "4. Попробуй другую сеть: Wi-Fi вместо мобильной или наоборот."),
     ("Нет серверов в списке",
-     "Чаще всего старая запись устройства занимает место в лимите. Открой «Подключиться → Устройства», нажми «Сбросить все», "
+     "Чаще всего старая запись устройства занимает место в лимите. Открой «Профиль → Устройства», нажми «Сбросить все», "
      "потом обнови подписку в приложении.\nЕсли не помогло, проверь, что подписка активна: «Профиль»."),
     ("Медленно работает",
      "Выбери в приложении другой сервер, лучше ближе к тебе. Перезапусти приложение и переподключись. "
@@ -475,7 +520,7 @@ FAQ = [
      "Если не пришло, напиши в поддержку и приложи скриншот оплаты."),
     ("Новый телефон",
      f"Одна подписка работает на нескольких устройствах (лимит: {config.HWID_LIMIT}). На новом телефоне просто добавь подписку через «Подключиться». "
-     "Если лимит занят, сбрось старые в разделе «Устройства»."),
+     "Если лимит занят, сбрось старые в разделе «Профиль → Устройства»."),
 ]
 
 def faq_screen():
@@ -1028,6 +1073,7 @@ async def got_xnote(m: Message):
 
 def start_loops():
     asyncio.create_task(survey_loop())
+    asyncio.create_task(block_loop())
 
 # ---------- новые люди, именные промокоды партнёров ----------
 def _origin(r):
@@ -1153,6 +1199,16 @@ async def cmd_promostat(m: Message, command: CommandObject):
         return await m.answer("Именных промокодов пока нет. Создай: /partnerpromo КОД ДНИ ПАРТНЁР")
     await m.answer("\n".join(L).strip(), disable_web_page_preview=True)
 
+@router.message(Command("panelraw"), is_owner)
+async def cmd_panelraw(m: Message, command: CommandObject):
+    u, _ = await pick_user(m, command, "Формат: /panelraw ID\nПоказывает, что именно панель отвечает про человека (ничего не меняет). Нужно, чтобы разобраться со сбоями устройств.")
+    if not u: return
+    try:
+        rows = await panel.raw_dump(u["id"])
+    except Exception as e:
+        return await m.answer(f"Панель не ответила: {esc(e)}")
+    await m.answer("\n\n".join(f"<b>{esc(a)}</b> · HTTP {b}\n<code>{esc(c)}</code>" for a, b, c in rows))
+
 @router.message(Command("ykcheck"), is_owner)
 async def cmd_ykcheck(m: Message):
     import payments
@@ -1172,7 +1228,7 @@ async def cmd_ykcheck(m: Message):
 
 # ----- меню команд -----
 OWNER_MENU = [("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
-              ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
+              ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("panelraw", "Что отвечает панель про человека"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
               ("top", "Топы"), ("new", "Новые люди и откуда"), ("partnerpromo", "Именной промокод партнёра"),
               ("promostat", "Статистика промокодов партнёров"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
 SUPPORT_MENU = [("tickets", "Обращения"), ("reply", "Ответить на обращение"), ("devices", "Устройства человека"), ("resetdevices", "Сбросить устройства")]
@@ -1188,6 +1244,6 @@ HELP_OWNER = (
     "/devices ID · /resetdevices ID · /devlimit ID N · /resettraffic ID\n"
     "\n<b>Новые люди и партнёры</b>\n/new [12ч|7д|30]: кто пришёл и откуда (приглашён, источник или сам)\n/newnotify on|off: сообщать о каждом новом сразу\n"
     "/partnerpromo КОД ДНИ ПАРТНЁР [МАКС] [ДАТА]: именной промокод партнёра\n/promostat [ПАРТНЁР]: сколько пришло и заплатило по его кодам\n"
-    "\n<b>Оплата</b>\n/ykcheck: проверить ключи ЮKassa и показать причину последней ошибки счёта\n"
+    "\n/panelraw ID: сырые ответы панели про человека (для разбора сбоев)\n\n<b>Оплата</b>\n/ykcheck: проверить ключи ЮKassa и показать причину последней ошибки счёта\n"
     "\n<b>Бот</b>\n/maintenance on|off [текст]: режим техработ\n/funnel: воронка\n/top: топ приглашающих и платящих\n/export: пользователи в CSV")
 HELP_SUPPORT = "\n/tickets: открытые обращения\n/reply НОМЕР текст: ответить\n/close НОМЕР: закрыть\n/devices ID · /resetdevices ID\n/note ID [текст]: заметка\n/msg ID текст: сообщение человеку"

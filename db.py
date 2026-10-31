@@ -226,6 +226,22 @@ def src_promos(code):
                     "payers": pay[0], "revenue": pay[1]})
     return out
 
+con.executescript("""
+CREATE TABLE IF NOT EXISTS blocked_devices(user_id INTEGER, hwid TEXT, name TEXT, ts INTEGER, PRIMARY KEY(user_id, hwid));
+""")
+
+def block_device(uid, hwid, name=""):
+    con.execute("INSERT OR REPLACE INTO blocked_devices(user_id,hwid,name,ts) VALUES(?,?,?,?)", (uid, str(hwid), name, int(time.time()))); con.commit()
+
+def unblock_device(uid, hwid):
+    con.execute("DELETE FROM blocked_devices WHERE user_id=? AND hwid=?", (uid, str(hwid))); con.commit()
+
+def blocked_list(uid):
+    return con.execute("SELECT * FROM blocked_devices WHERE user_id=? ORDER BY ts DESC", (uid,)).fetchall()
+
+def blocked_users():
+    return [r[0] for r in con.execute("SELECT DISTINCT user_id FROM blocked_devices")]
+
 def new_users(since=0, limit=30):
     """Новые люди: за период (since — unix-время) или просто последние limit."""
     if since:

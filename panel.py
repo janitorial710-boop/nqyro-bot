@@ -53,6 +53,39 @@ def _as_users(data):
     lst = data if isinstance(data, list) else [data]
     return [u for u in (_as_user(x) for x in lst) if isinstance(u, dict) and u.get("uuid")]
 
+def _num_id(u):
+    """Числовой id пользователя (панель 3.x), если он есть."""
+    for k in ("id", "uuid"):
+        v = u.get(k)
+        if isinstance(v, int) and not isinstance(v, bool): return v
+        if isinstance(v, str) and v.isdigit(): return int(v)
+    return None
+
+def _who_body(u, **extra):
+    """Как назвать пользователя в теле запроса к устройствам: панель 3.x ждёт userId (число), 2.x ждёт userUuid."""
+    n = _num_id(u)
+    body = {"userId": n} if n is not None else {"userUuid": u["uuid"]}
+    body.update(extra)
+    return body
+
+async def _patch_user(u, fields: dict):
+    """Обновляет пользователя. Разные версии панели называют его по-разному, поэтому пробуем по очереди:
+    uuid (2.x), username, числовой id (3.x). Бросает исключение с ответом панели, если ни один вариант не подошёл."""
+    idents = []
+    n = _num_id(u)
+    if u.get("uuid") and n is None: idents.append({"uuid": u["uuid"]})
+    if u.get("username"): idents.append({"username": u["username"]})
+    if n is not None: idents.append({"id": n})
+    last = None
+    for ident in idents or [{"uuid": u.get("uuid")}]:
+        st, data = await _call("PATCH", "/api/users", json={**ident, **fields})
+        if st < 300:
+            return data
+        last = (st, data)
+        if st != 400:   # 400 = «не то поле», пробуем следующее; остальное (401/404/500) от имени не зависит
+            break
+    raise RuntimeError(f"panel update {last[0]}: {last[1]}")
+
 def _is_outage(st: int) -> bool:
     """Ответ панели, по которому нельзя судить, есть ли пользователь (сбой, перегрузка, нет доступа)."""
     return st >= 500 or st in (401, 403, 408, 429)
@@ -109,11 +142,7 @@ async def _sync(uid: int, until_ts: int):
             or (want in ("ACTIVE", "DISABLED") and st_now != want)
             or (want == "EXPIRED" and st_now == "DISABLED"))
     if need:
-        body = {"uuid": u["uuid"], "expireAt": _iso(until_ts), "status": want}
-        st, data = await _call("PATCH", "/api/users", json=body)
-        if st >= 300:
-            raise RuntimeError(f"panel update {st}: {data}")
-        return data
+        return _as_user(await _patch_user(u, {"expireAt": _iso(until_ts), "status": want}))
     return u
 
 def _fallback_link(uid: int):
@@ -196,12 +225,12 @@ async def hwid_list(uid: int):
 async def hwid_reset(uid: int):
     """Отвязывает все устройства человека."""
     u = await _need_user(uid)
-    await _ok("POST", "/api/hwid/devices/delete-all", json={"userUuid": u["uuid"]})
+    await _ok("POST", "/api/hwid/devices/delete-all", json=_who_body(u))
 
 async def hwid_delete(uid: int, hwid: str):
     """Отвязывает одно устройство."""
     u = await _need_user(uid)
-    await _ok("POST", "/api/hwid/devices/delete", json={"userUuid": u["uuid"], "hwid": hwid})
+    await _ok("POST", "/api/hwid/devices/delete", json=_who_body(u, hwid=hwid))
 
 async def hwid_limit(uid: int):
     """Текущий лимит устройств человека в панели (или HWID_LIMIT из настроек, если панель не сказала)."""
@@ -210,7 +239,7 @@ async def hwid_limit(uid: int):
 
 async def set_hwid_limit(uid: int, limit: int):
     u = await _need_user(uid)
-    await _ok("PATCH", "/api/users", json={"uuid": u["uuid"], "hwidDeviceLimit": limit})
+    await _patch_user(u, {"hwidDeviceLimit": limit})
 
 async def revoke_sub(uid: int):
     """Перевыпускает ссылку подписки (старая перестаёт работать). Возвращает новую ссылку или None."""
@@ -266,7 +295,7 @@ async def _free_slots(u) -> int:
     devs.sort(key=lambda d: d.get("updatedAt") or d.get("createdAt") or "")   # самые давние первыми
     n = 0
     for d in devs[:excess]:
-        await _ok("POST", "/api/hwid/devices/delete", json={"userUuid": u["uuid"], "hwid": d["hwid"]})
+        await _ok("POST", "/api/hwid/devices/delete", json=_who_body(u, hwid=d["hwid"]))
         n += 1
     _freed[u["uuid"]] = time.time()
     logging.info("freed %s device slot(s) for %s", n, u.get("username"))
@@ -291,6 +320,23 @@ async def free_device_slot_by_sub(sub: str) -> int:
     if st != 200 or not isinstance(u, dict) or not u.get("uuid") or (u.get("subscriptionUrl") or "").rstrip("/") != sub.rstrip("/"):
         return 0
     return await _free_slots(u)
+
+async def raw_dump(uid: int) -> list:
+    """Сырые ответы панели про человека для /panelraw (только чтение). Список (подпись, статус, текст)."""
+    import json, re
+    def fmt(data):
+        t = json.dumps(data, ensure_ascii=False)
+        t = re.sub(r'("(?:subscriptionUrl|shortUuid|subscriptionUuid|vlessUuid|trojanPassword|ssPassword|password)"\s*:\s*")([^"]{4})[^"]*', r'\1\2…', t)
+        return t[:900]
+    out = []
+    st, d = await _call("GET", f"/api/users/by-username/tg_{uid}"); out.append(("by-username", st, fmt(d)))
+    st2, d2 = await _call("GET", f"/api/users/by-telegram-id/{uid}"); out.append(("by-telegram-id", st2, fmt(d2)))
+    u = _as_user(d) if st == 200 and d else (_as_users(d2) or [None])[0] if st2 == 200 and d2 else None
+    if isinstance(u, dict) and u.get("uuid"):
+        st3, d3 = await _call("GET", f"/api/hwid/devices/{u['uuid']}"); out.append(("hwid devices", st3, fmt(d3)))
+    else:
+        out.append(("hwid devices", 0, "пропущено: в ответе пользователя нет uuid"))
+    return out
 
 async def diagnose(uid: int) -> dict:
     """Всё, что нужно, чтобы понять, почему человек не подключается (для /diag). Ничего не меняет."""

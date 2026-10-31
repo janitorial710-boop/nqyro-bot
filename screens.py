@@ -47,7 +47,7 @@ def connect(u, sub=None):
             *([[b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=quote(sub, safe=""))),
                 b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=quote(sub, safe="")))]] if config.OPEN_URL else []),
             [Btn(text="Скопировать ссылку", copy_text=CopyTextButton(text=sub))],
-            [b("Устройства", "dev:open"), b("Не работает?", "faq:open")],
+            [b("Не работает?", "faq:open")],
             [b("Назад", "go:start")]]))
 
 def connect_error(u):
@@ -105,7 +105,7 @@ def payment(u, plan, gift=False):
     price_line = f"К оплате: {price} ₽" + (f" вместо {base} ₽ (скидка: {dlabel})" if price != base else "")
     return ("05_payment.png", f"<b>{'Оплата подарка' if gift else 'Оплата'}</b>\n\nТариф: {name}\n{price_line}{bal_line}\n\nВыбери способ оплаты.",
         kb(*rows, [("СБП", f"{g}pay:{plan}:sbp"), ("Банковская карта", f"{g}pay:{plan}:card")],
-           [("Другие способы", f"{g}pay:{plan}:any")], *_alt_rows(f"{g}pay:{plan}"),
+           *_alt_rows(f"{g}pay:{plan}"),
            *([] if gift or not config.AUTORENEW else [[("Автопродление картой: " + ("включено" if u["autorenew"] else "выключено"), f"ar:t:{plan}")]]),
            *([] if gift else [[("Пополнить баланс", "go:topup")]]),
            [("Назад", "go:gift" if gift else "go:plans")]))
@@ -152,7 +152,7 @@ def topup_pay(u, amount):
     line = f"Сумма: {amount} ₽" + (f"\nБонус: +{bonus} ₽\nНа баланс придёт: {amount + bonus} ₽" if bonus else "")
     return ("05_payment.png", f"<b>Пополнение баланса</b>\n\n{line}\n\nВыбери способ оплаты.",
             kb([("СБП", f"tpay:{amount}:sbp"), ("Банковская карта", f"tpay:{amount}:card")],
-               [("Другие способы", f"tpay:{amount}:any")], *_alt_rows(f"tpay:{amount}"), [("Назад", "go:topup")]))
+               *_alt_rows(f"tpay:{amount}"), [("Назад", "go:topup")]))
 
 def topup_ok(u):
     rub, secs = db.convert_quote(u)
@@ -194,12 +194,13 @@ def profile(u):
             f"Баланс: {db.total_balance(u):.0f} ₽"
             + (f"\nСкидка на следующую оплату: {db.disc_label(u)}" if u["disc_kind"] else ""))
     return ("07_profile.png", text,
-        kb([("Подключиться", "go:connect"), ("Продлить", "go:plans")],
-           [("Пополнить баланс", "go:topup"), ("Вывести деньги", "wd:start")],
+        kb([("Подключиться", "go:connect"), ("Устройства", "dev:open")],
+           [("Продлить", "go:plans"), ("Пополнить баланс", "go:topup")],
+           [("Вывести деньги", "wd:start"), ("Промокод", "promo")],
            *([[("Обменять баланс на дни", "go:convert")]] if db.convert_quote(u)[0] else []),
            *([[("Автопродление", "ar:open")]] if config.AUTORENEW else []),
            *([[("Партнёрка", "go:partner")]] if db.is_partner(u["id"]) else []),
-           [("Промокод", "promo"), ("Поддержка", "go:support")],
+           [("Поддержка", "go:support")],
            [("Назад", "go:start")]))
 
 def friends(u):
