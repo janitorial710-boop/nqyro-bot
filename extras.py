@@ -128,12 +128,18 @@ def _dev_since(d_):
 async def dev_screen(uid, note=""):
     """Экран «Устройства». Если панель не ответила, показывает понятное сообщение."""
     try:
-        devs = await panel.hwid_list(uid); limit = await panel.hwid_limit(uid)
+        devs = await panel.hwid_list(uid)
     except Exception as e:
         logging.warning("devices uid=%s: %s", uid, e)
-        text = ("<b>Устройства</b>\n\nПока нечего показывать: сначала нажми «Подключиться» и добавь подписку в приложение.\n"
-                "Если ты уже подключался и видишь эту надпись, напиши в поддержку.")
-        return ("22_devices.png", text, kb([("Назад", "go:connect")]))
+        if "ещё нет в панели" in str(e) or "не настроена" in str(e):
+            text = ("<b>Устройства</b>\n\nПока нечего показывать: сначала нажми «Подключиться» и добавь подписку в приложение.")
+        else:
+            text = ("<b>Устройства</b>\n\nНе получилось получить список устройств: сервер подключения не ответил. "
+                    "Нажми «Обновить» через минуту. Если не пройдёт, напиши в поддержку.")
+        if uid in config.ADMIN_IDS: text += f"\n\nПричина (видно только тебе): {esc(e)}"
+        return ("22_devices.png", text, kb([("Обновить", "dev:open")], [("Назад", "go:connect")]))
+    try: limit = await panel.hwid_limit(uid)
+    except Exception: limit = config.HWID_LIMIT
     L = [f"<b>Устройства: {len(devs)} из {limit}</b>", ""]
     L += [f"{i}. {esc(_dev_name(x))}" + (f" · с {_dev_since(x)}" if _dev_since(x) else "") for i, x in enumerate(devs, 1)] or ["Пока ни одно устройство не подключено."]
     L += ["", "Чтобы убрать чужое или старое устройство, нажми на него ниже. Оно потеряет доступ, а место освободится.",
