@@ -273,8 +273,16 @@ async def set_hwid_limit(uid: int, limit: int):
 
 async def revoke_sub(uid: int):
     """Перевыпускает ссылку подписки (старая перестаёт работать). Возвращает новую ссылку или None."""
+    return await rotate_keys(uid, new_link=True)
+
+async def rotate_keys(uid: int, new_link: bool = False):
+    """Меняет ключи доступа человека (vless uuid и пароли): уже подключённые устройства сразу отваливаются,
+    а старые конфиги в приложениях перестают работать. Отвязка HWID этого не делает: HWID нужен только при
+    загрузке подписки, а само соединение идёт по общему ключу.
+    new_link=False: ссылка подписки остаётся прежней, остальные устройства подхватят новые ключи при обновлении подписки.
+    new_link=True: ссылка тоже новая, старая мертва совсем. Возвращает ссылку подписки или None."""
     u = await _need_user(uid)
-    data = await _ok("POST", f"/api/users/{u['uuid']}/actions/revoke", json={})
+    data = await _ok("POST", f"/api/users/{u['uuid']}/actions/revoke", json={"revokeOldSubscription": bool(new_link)})
     return data.get("subscriptionUrl") if isinstance(data, dict) else None
 
 async def reset_traffic(uid: int):

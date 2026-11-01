@@ -174,7 +174,8 @@ async def cb_dev_rm(c: CallbackQuery):
     if not hit:
         return await B.show(c, await dev_screen(uid, "Этого устройства уже нет в списке."))
     await B.show(c, ("22_devices.png", f"<b>Заблокировать устройство?</b>\n\n{esc(_dev_name(hit))}\n\n"
-                     "Оно отвяжется от подписки и не сможет снова подключиться, пока ты сам не разрешишь его в списке «Заблокированные».",
+                     "Оно отвяжется, отключится от VPN и не сможет снова подключиться, пока ты сам не разрешишь его в списке «Заблокированные».\n\n"
+                     "Твои устройства подхватят новые ключи сами, ничего делать не нужно.",
                      kb([("Да, заблокировать", f"dev:rmy:{h}")], [("Отмена", "dev:open")])))
 
 @router.callback_query(F.data.startswith("dev:rmy:"))
@@ -183,20 +184,26 @@ async def cb_dev_rmy(c: CallbackQuery):
     last = int(db.kv_get(f"devrm:{uid}") or 0)
     if time.time() - last < 5:
         return await answer_cb(c, "Подожди пару секунд.", False)
-    hit = None
+    hit = None; rotate_err = None
     try:
         devs = await panel.hwid_list(uid)
         hit = next((x for x in devs if _dh(x.get("hwid")) == h), None)
         if hit:
             db.block_device(uid, hit["hwid"], _dev_name(hit))   # сначала в чёрный список: даже если удаление не пройдёт, цикл проверки добьёт
             await panel.hwid_delete(uid, hit["hwid"])
+            # одной отвязки мало: у устройства остаётся рабочий ключ и оно сидит подключённым. Меняем ключи, ссылка та же
+            try: await panel.rotate_keys(uid)
+            except Exception as e2:
+                rotate_err = e2; logging.warning("rotate keys after block uid=%s: %s", uid, e2)
     except Exception as e:
         logging.warning("device remove uid=%s: %s", uid, e)
         if hit: db.unblock_device(uid, hit["hwid"])   # не вышло отвязать: не держим его в чёрном списке, чтобы сообщение об ошибке не врало
         return await answer_cb(c, "Не получилось отвязать. Попробуй ещё раз или напиши в поддержку." + _why(uid, e), True)
     db.kv_set(f"devrm:{uid}", str(int(time.time())))
     await answer_cb(c, "Готово" if hit else "Это устройство уже отвязано")
-    await B.show(c, await dev_screen(uid, f"Отвязано и заблокировано: {esc(_dev_name(hit))}. Если оно снова появится, бот уберёт его в течение минуты." if hit else "Это устройство уже было отвязано."))
+    await B.show(c, await dev_screen(uid, (f"Отвязано и заблокировано: {esc(_dev_name(hit))}. Оно отключится от VPN. "
+                                                 "Твои устройства подхватят новые ключи сами, обычно в течение часа (или сразу при открытии приложения)."
+                                                 + (" Но ключи сменить не вышло, напиши в поддержку." if rotate_err else "")) if hit else "Это устройство уже было отвязано."))
 
 @router.callback_query(F.data.startswith("dev:al:"))
 async def cb_dev_allow(c: CallbackQuery):
@@ -215,10 +222,21 @@ async def block_pass():
             for d_ in await panel.hwid_list(uid):
                 if str(d_.get("hwid")) in bad:
                     await panel.hwid_delete(uid, d_["hwid"]); n += 1; logging.info("blocked device removed again uid=%s", uid)
+                    await _escalate_block(uid)
         except Exception as e:
             logging.warning("block_loop uid=%s: %s", uid, e)
         await asyncio.sleep(0.3)
     return n
+
+async def _escalate_block(uid):
+    """Заблокированное устройство само обновило подписку и снова получило рабочие ключи: меняем ключи ещё раз.
+    Ссылку не трогаем, чтобы остальные устройства человека обновились сами. Не чаще раза в 10 минут."""
+    if time.time() - int(db.kv_get(f"blockesc:{uid}") or 0) < 600: return
+    try: await panel.rotate_keys(uid)
+    except Exception as e:
+        logging.warning("escalate block uid=%s: %s", uid, e); return
+    db.kv_set(f"blockesc:{uid}", str(int(time.time())))
+    logging.info("blocked device came back, keys rotated again uid=%s", uid)
 
 async def block_loop():
     """Раз в минуту следит за заблокированными устройствами."""
@@ -945,6 +963,37 @@ async def cmd_revoke(m: Message, command: CommandObject):
     if ok:
         B.alog(m, "revoke", u["id"])
         await m.answer("Ссылка перевыпущена." + (f"\nНовая:\n<code>{esc(url)}</code>" if url else " Новая будет в разделе «Подключиться»."))
+
+@router.message(Command("unblock"), is_owner)
+async def cmd_unblock(m: Message, command: CommandObject):
+    u, _ = await pick_user(m, command, "Формат: /unblock ID\nСнимает блокировку со всех заблокированных устройств человека.")
+    if not u: return
+    bl = db.blocked_list(u["id"])
+    if not bl: return await m.answer("У него нет заблокированных устройств.")
+    for b_ in bl: db.unblock_device(u["id"], b_["hwid"])
+    B.alog(m, "unblock", u["id"])
+    await m.answer(f"Разблокировано устройств: {len(bl)}. Пусть добавит подписку в приложении заново "
+                   f"(или отправь ему ссылку из <code>/sub {u['id']}</code>).")
+
+@router.message(Command("link"), is_owner)
+async def cmd_link(m: Message, command: CommandObject):
+    """Ссылки для автоимпорта подписки в Happ/Incy, чтобы переслать человеку."""
+    from urllib.parse import quote
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    u, _ = await pick_user(m, command, "Формат: /link ID\nДаёт ссылки автоимпорта подписки в Happ и Incy, их можно переслать человеку.")
+    if not u: return
+    info = await panel.get_info(u["id"])
+    sub = (info or {}).get("subscriptionUrl")
+    if not sub: return await m.answer("В панели такого пользователя нет (или панель недоступна).")
+    L = [f"Подписка {u['id']}:", f"<code>{esc(sub)}</code>", "",
+         "Прямые ссылки (открывать на телефоне человека, в Телеграме могут не нажиматься, тогда копировать в браузер):",
+         f"Incy: <code>incy://import/{esc(sub)}</code>", f"Happ: <code>happ://add/{esc(sub)}</code>"]
+    rows = []
+    if config.OPEN_URL:
+        rows = [[InlineKeyboardButton(text="Добавить в Incy", url=config.OPEN_URL.format(app="incy", sub=quote(sub, safe=""))),
+                 InlineKeyboardButton(text="Добавить в Happ", url=config.OPEN_URL.format(app="happ", sub=quote(sub, safe="")))]]
+        L += ["", "Кнопки ниже ведут на твою страницу импорта: перешли это сообщение человеку, он нажмёт и подписка добавится сама."]
+    await m.answer("\n".join(L), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
 @router.message(Command("devices"), is_support)
 async def cmd_devices(m: Message, command: CommandObject):
