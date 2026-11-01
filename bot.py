@@ -76,6 +76,8 @@ async def screen_for(key, uid):
     if key == "connect":
         if u["sub_until"] <= time.time():
             return screens.connect(u, None)
+        if config.PER_DEVICE_KEYS:
+            return await extras.connect_screen(uid, 1)
         sub = await panel.ensure_user(uid)
         if not sub:
             return screens.connect_error(u)

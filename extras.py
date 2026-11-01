@@ -62,7 +62,7 @@ TK_WAIT = {}   # id человека -> id обращения (0 = новое), 
 TK_REPLY = {}  # id сотрудника -> (id обращения, время): ждём текст ответа
 WD_REJ = {}    # id владельца -> (id заявки, время): ждём причину отказа
 XNOTE = {}     # id владельца -> (id человека, время): ждём текст заметки
-MY_PREFIX = ("wd:", "tk:", "tkr:", "tkc:", "wdp:", "dev:", "sv:", "faq:", "x:")
+MY_PREFIX = ("wd:", "tk:", "tkr:", "tkc:", "wdp:", "dev:", "sv:", "faq:", "x:", "conn:")
 
 def clear_waits(uid):
     for d in (WD, TK_WAIT, TK_REPLY, WD_REJ, XNOTE): d.pop(uid, None)
@@ -131,6 +131,8 @@ def _dev_since(d_):
 
 async def dev_screen(uid, note=""):
     """Экран «Устройства». Если панель не ответила, показывает понятное сообщение."""
+    if config.PER_DEVICE_KEYS:
+        return await dev_screen_keys(uid, note)
     try:
         devs = await panel.hwid_list(uid)
     except Exception as e:
@@ -161,6 +163,108 @@ async def dev_screen(uid, note=""):
     rows += [[("Уведомления о новых устройствах: " + ("вкл" if _alert_on(uid) else "выкл"), "dev:alt")], [("Назад", "go:profile")]]
     return ("22_devices.png", "\n".join(L), kb(*rows))
 
+async def connect_screen(uid, sel=1):
+    """«Подключиться» при отдельных ключах: основной ключ и ключи остальных устройств, кнопки автоимпорта для выбранного."""
+    u = db.get_user(uid)
+    sub1 = await panel.ensure_user(uid)
+    if not sub1:
+        return screens.connect_error(u)
+    try:
+        await panel.tighten_main(uid)
+    except Exception:
+        logging.exception("tighten_main uid=%s", uid)
+    try:
+        info = await panel.keys_info(uid)
+    except Exception:
+        logging.exception("keys_info uid=%s", uid)
+        info = [(1, sub1, "ACTIVE")]
+    keys = [(n, s) for n, s, st in info if s]
+    if sel not in dict(keys): sel = keys[0][0] if keys else 1
+    if not keys: keys = [(1, sub1)]
+    can_add = len(keys) < config.HWID_LIMIT + db.slots_active(uid)
+    return screens.connect_keys(u, keys, sel, can_add)
+
+@router.callback_query(F.data.startswith("conn:k:"))
+async def cb_conn_k(c: CallbackQuery):
+    await c.answer()
+    try: n = int(c.data.split(":")[2])
+    except ValueError: return
+    await B.show(c, await connect_screen(c.from_user.id, n))
+
+@router.callback_query(F.data == "conn:new")
+async def cb_conn_new(c: CallbackQuery):
+    uid = c.from_user.id
+    if db.get_user(uid)["sub_until"] <= time.time():
+        return await c.answer("Подписка не активна.", show_alert=True)
+    if time.time() - int(db.kv_get(f"connnew:{uid}") or 0) < 4:
+        return await c.answer("Подожди пару секунд.")
+    db.kv_set(f"connnew:{uid}", str(int(time.time())))
+    try:
+        n, _ = await panel.create_key(uid)
+    except Exception as e:
+        logging.warning("conn:new uid=%s: %s", uid, e)
+        msg = ("Лимит устройств исчерпан. Отключи ненужное в «Устройства» или докупи устройство." if "лимит" in str(e)
+               else "Не получилось добавить устройство. Попробуй ещё раз через минуту." + _why(uid, e))
+        return await c.answer(msg, show_alert=True)
+    await c.answer("Ключ для нового устройства готов")
+    scr = await connect_screen(uid, n)
+    await B.show(c, (("28_device_added.png",) + tuple(scr[1:])) if scr[0] == "03_connect.png" else scr)
+
+def _keys_dev_line(devs):
+    return "; ".join(_dev_name(x) for x in devs[:3]) if devs else "ещё не подключено"
+
+async def dev_screen_keys(uid, note=""):
+    """Экран «Устройства» при отдельных ключах."""
+    try:
+        ks = await panel.keys_devices(uid)
+    except Exception as e:
+        logging.warning("devices(keys) uid=%s: %s", uid, e)
+        if "ещё нет в панели" in str(e) or "не настроена" in str(e):
+            text = "<b>Устройства</b>\n\nПока нечего показывать: сначала нажми «Подключиться» и добавь подписку в приложение."
+        else:
+            text = "<b>Устройства</b>\n\nНе получилось получить список устройств: сервер подключения не ответил. Нажми «Обновить» через минуту."
+        if uid in config.ADMIN_IDS: text += f"\n\nПричина (видно только тебе): {esc(e)}"
+        return ("22_devices.png", text, kb([("Обновить", "dev:open")], [("Назад", "go:profile")]))
+    allowed = config.HWID_LIMIT + db.slots_active(uid); act = db.slots_active(uid)
+    L = [f"<b>Устройства: {len(ks)} из {allowed}</b>" + (f" (докуплено: {act})" if act else ""), ""]
+    L += [f"{n}. {esc(_keys_dev_line(devs))}" + (f" · с {_dev_since(devs[0])}" if devs and _dev_since(devs[0]) else "") for n, st, devs in ks]
+    L += ["", "У каждого устройства свой ключ. Если отключить устройство, его ключ перестанет работать сразу, остальные устройства это не затронет."]
+    if note: L = [note, ""] + L
+    rows = [[(f"Отключить {n}. {_keys_dev_line(devs)[:28]}", f"dev:kr:{n}")] for n, st, devs in ks]
+    if len(ks) < allowed:
+        rows.append([("Добавить устройство", "conn:new")])
+    if config.SLOT_PRICE > 0 and act < config.SLOT_MAX:
+        rows.append([(f"Докупить устройство · {config.SLOT_PRICE} ₽", "slot:buy")])
+    rows += [[("Обновить", "dev:open")], [("Назад", "go:profile")]]
+    return ("22_devices.png", "\n".join(L), kb(*rows))
+
+@router.callback_query(F.data.startswith("dev:kr:"))
+async def cb_dev_kr(c: CallbackQuery):
+    n = c.data.split(":")[2]
+    await c.answer()
+    await B.show(c, ("29_device_ask.png",
+        f"<b>Отключить устройство {esc(n)}?</b>\n\nЕго ключ перестанет работать сразу, и оно отвалится от VPN. Остальные твои устройства не затронутся.",
+        kb([("Да, отключить", f"dev:kry:{n}")], [("Отмена", "dev:open")])))
+
+@router.callback_query(F.data.startswith("dev:kry:"))
+async def cb_dev_kry(c: CallbackQuery):
+    uid = c.from_user.id
+    try: n = int(c.data.split(":")[2])
+    except ValueError: return await c.answer()
+    if time.time() - int(db.kv_get(f"devrm:{uid}") or 0) < 5:
+        return await c.answer("Подожди пару секунд.")
+    try:
+        if n == 1: await panel.revoke_main(uid)
+        else: await panel.ban_key(uid, n)
+    except Exception as e:
+        logging.warning("device key remove uid=%s n=%s: %s", uid, n, e)
+        return await c.answer("Не получилось отключить. Попробуй ещё раз или напиши в поддержку." + _why(uid, e), show_alert=True)
+    db.kv_set(f"devrm:{uid}", str(int(time.time())))
+    await c.answer("Готово")
+    scr = await dev_screen(uid, f"Устройство {n} отключено: его ключ больше не работает. Остальные устройства работают как раньше."
+                                + (" Для устройства 1 выпущена новая ссылка: нажми «Подключиться» и добавь её заново." if n == 1 else ""))
+    await B.show(c, ("30_device_off.png",) + tuple(scr[1:]))
+
 @router.callback_query(F.data.startswith("dev:rm:"))
 async def cb_dev_rm(c: CallbackQuery):
     """Первое нажатие «Отвязать»: просим подтвердить. Само удаление и блокировка делаются в cb_dev_rmy."""
@@ -174,8 +278,7 @@ async def cb_dev_rm(c: CallbackQuery):
     if not hit:
         return await B.show(c, await dev_screen(uid, "Этого устройства уже нет в списке."))
     await B.show(c, ("22_devices.png", f"<b>Заблокировать устройство?</b>\n\n{esc(_dev_name(hit))}\n\n"
-                     "Оно отвяжется, отключится от VPN и не сможет снова подключиться, пока ты сам не разрешишь его в списке «Заблокированные».\n\n"
-                     "Твои устройства подхватят новые ключи сами, ничего делать не нужно.",
+                     "Оно отвяжется от подписки и не сможет снова подключиться, пока ты сам не разрешишь его в списке «Заблокированные».",
                      kb([("Да, заблокировать", f"dev:rmy:{h}")], [("Отмена", "dev:open")])))
 
 @router.callback_query(F.data.startswith("dev:rmy:"))
@@ -184,26 +287,20 @@ async def cb_dev_rmy(c: CallbackQuery):
     last = int(db.kv_get(f"devrm:{uid}") or 0)
     if time.time() - last < 5:
         return await answer_cb(c, "Подожди пару секунд.", False)
-    hit = None; rotate_err = None
+    hit = None
     try:
         devs = await panel.hwid_list(uid)
         hit = next((x for x in devs if _dh(x.get("hwid")) == h), None)
         if hit:
             db.block_device(uid, hit["hwid"], _dev_name(hit))   # сначала в чёрный список: даже если удаление не пройдёт, цикл проверки добьёт
             await panel.hwid_delete(uid, hit["hwid"])
-            # одной отвязки мало: у устройства остаётся рабочий ключ и оно сидит подключённым. Меняем ключи, ссылка та же
-            try: await panel.rotate_keys(uid)
-            except Exception as e2:
-                rotate_err = e2; logging.warning("rotate keys after block uid=%s: %s", uid, e2)
     except Exception as e:
         logging.warning("device remove uid=%s: %s", uid, e)
         if hit: db.unblock_device(uid, hit["hwid"])   # не вышло отвязать: не держим его в чёрном списке, чтобы сообщение об ошибке не врало
         return await answer_cb(c, "Не получилось отвязать. Попробуй ещё раз или напиши в поддержку." + _why(uid, e), True)
     db.kv_set(f"devrm:{uid}", str(int(time.time())))
     await answer_cb(c, "Готово" if hit else "Это устройство уже отвязано")
-    await B.show(c, await dev_screen(uid, (f"Отвязано и заблокировано: {esc(_dev_name(hit))}. Оно отключится от VPN. "
-                                                 "Твои устройства подхватят новые ключи сами, обычно в течение часа (или сразу при открытии приложения)."
-                                                 + (" Но ключи сменить не вышло, напиши в поддержку." if rotate_err else "")) if hit else "Это устройство уже было отвязано."))
+    await B.show(c, await dev_screen(uid, f"Отвязано и заблокировано: {esc(_dev_name(hit))}. Если оно снова появится, бот уберёт его в течение минуты." if hit else "Это устройство уже было отвязано."))
 
 @router.callback_query(F.data.startswith("dev:al:"))
 async def cb_dev_allow(c: CallbackQuery):
@@ -222,21 +319,10 @@ async def block_pass():
             for d_ in await panel.hwid_list(uid):
                 if str(d_.get("hwid")) in bad:
                     await panel.hwid_delete(uid, d_["hwid"]); n += 1; logging.info("blocked device removed again uid=%s", uid)
-                    await _escalate_block(uid)
         except Exception as e:
             logging.warning("block_loop uid=%s: %s", uid, e)
         await asyncio.sleep(0.3)
     return n
-
-async def _escalate_block(uid):
-    """Заблокированное устройство само обновило подписку и снова получило рабочие ключи: меняем ключи ещё раз.
-    Ссылку не трогаем, чтобы остальные устройства человека обновились сами. Не чаще раза в 10 минут."""
-    if time.time() - int(db.kv_get(f"blockesc:{uid}") or 0) < 600: return
-    try: await panel.rotate_keys(uid)
-    except Exception as e:
-        logging.warning("escalate block uid=%s: %s", uid, e); return
-    db.kv_set(f"blockesc:{uid}", str(int(time.time())))
-    logging.info("blocked device came back, keys rotated again uid=%s", uid)
 
 async def block_loop():
     """Раз в минуту следит за заблокированными устройствами."""
@@ -995,6 +1081,47 @@ async def cmd_link(m: Message, command: CommandObject):
         L += ["", "Кнопки ниже ведут на твою страницу импорта: перешли это сообщение человеку, он нажмёт и подписка добавится сама."]
     await m.answer("\n".join(L), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
+async def _key_msg(m, uid, n, sub):
+    from urllib.parse import quote
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    L = [f"Устройство {n} человека {uid}:", f"<code>{esc(sub)}</code>", "",
+         f"Incy: <code>incy://import/{esc(sub)}</code>", f"Happ: <code>happ://add/{esc(sub)}</code>"]
+    rows = []
+    if config.OPEN_URL:
+        rows = [[InlineKeyboardButton(text="Добавить в Incy", url=config.OPEN_URL.format(app="incy", sub=quote(sub, safe=""))),
+                 InlineKeyboardButton(text="Добавить в Happ", url=config.OPEN_URL.format(app="happ", sub=quote(sub, safe="")))]]
+    await m.answer("\n".join(L), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+
+@router.message(Command("keys"), is_owner)
+async def cmd_keys(m: Message, command: CommandObject):
+    u, _ = await pick_user(m, command, "Формат: /keys ID\nПоказывает отдельные ключи устройств человека.")
+    if not u: return
+    ok, info = await panel_do(m, panel.keys_info(u["id"]))
+    if not ok: return
+    await m.answer("\n".join([f"Ключи человека {u['id']}:"] + [f"{n}: {esc(st)}\n<code>{esc(sub)}</code>" for n, sub, st in info]
+                              + ["", f"Добавить: /keyadd {u['id']}", f"Удалить устройство N: /keyban {u['id']} N"]))
+
+@router.message(Command("keyadd"), is_owner)
+async def cmd_keyadd(m: Message, command: CommandObject):
+    u, _ = await pick_user(m, command, "Формат: /keyadd ID\nСоздаёт отдельный ключ для ещё одного устройства человека (в пределах его лимита).")
+    if not u: return
+    ok, res = await panel_do(m, panel.create_key(u["id"]))
+    if not ok: return
+    n, sub = res
+    B.alog(m, "keyadd", u["id"])
+    if not sub: return await m.answer(f"Ключ {n} создан, но ссылку панель не отдала. Посмотри /keys {u['id']}.")
+    await _key_msg(m, u["id"], n, sub)
+
+@router.message(Command("keyban"), is_owner)
+async def cmd_keyban(m: Message, command: CommandObject):
+    u, rest = await pick_user(m, command, "Формат: /keyban ID N\nУдаляет ключ устройства N: оно отваливается сразу, остальные устройства не затрагиваются.")
+    if not u: return
+    if not rest or not rest[0].isdigit(): return await m.answer("Укажи номер устройства: /keyban ID N (номера в /keys ID).")
+    ok, _ = await panel_do(m, panel.ban_key(u["id"], int(rest[0])))
+    if not ok: return
+    B.alog(m, "keyban", u["id"], rest[0])
+    await m.answer(f"Устройство {rest[0]} удалено. Остальные устройства человека работают как раньше.")
+
 @router.message(Command("devices"), is_support)
 async def cmd_devices(m: Message, command: CommandObject):
     u, _ = await pick_user(m, command, "Формат: /devices ID\nСписок устройств человека.")
@@ -1299,6 +1426,7 @@ async def cmd_ykcheck(m: Message):
 
 # ================= Слежение за устройствами, докупка слотов, отчёт о шеринге =================
 _TGMAP = {}   # id пользователя в панели -> Telegram ID
+_NMAP = {}    # id пользователя в панели -> номер ключа устройства
 
 def _alert_on(uid): return db.kv_get(f"devalert_off:{uid}") != "1"
 
@@ -1307,9 +1435,14 @@ async def _tg_of(d_):
     if ident is None: return None
     key = str(ident)
     if key in _TGMAP: return _TGMAP[key]
-    tg = await panel.tg_by_ident(ident)
-    if tg: _TGMAP[key] = tg
+    tg, n = await panel.tg_n_by_ident(ident)
+    if tg: _TGMAP[key] = tg; _NMAP[key] = n
     return tg
+
+def _nof(d_):
+    """Номер ключа устройства (1 = основной), на котором зарегистрировано это устройство."""
+    ident = d_.get("userId") if d_.get("userId") is not None else d_.get("userUuid")
+    return _NMAP.get(str(ident), 1)
 
 async def device_watch_pass():
     """Один проход слежения: находит новые устройства и сообщает человеку. Первый проход только запоминает то, что уже есть.
@@ -1333,6 +1466,23 @@ async def device_watch_pass():
         if not hw or con.execute("SELECT 1 FROM seen_devices WHERE user_id=? AND hwid=?", (tg, hw)).fetchone(): continue
         prev = con.execute("SELECT COUNT(*) FROM seen_devices WHERE user_id=?", (tg,)).fetchone()[0]
         con.execute("INSERT OR IGNORE INTO seen_devices(user_id,hwid,first_seen) VALUES(?,?,?)", (tg, hw, now if seeded else 0)); con.commit()
+        if config.PER_DEVICE_KEYS:
+            # у каждого устройства свой ключ: тревога только если на ключе устройства 2 и дальше появилось ВТОРОЕ устройство (ключ кому-то переслали).
+            # Первое устройство на ключе это сам человек, ключ 1 пропускаем, чтобы не шуметь у людей с несколькими устройствами на старом ключе.
+            n = _nof(d_)
+            if n >= 2:
+                kk = f"devkey:{tg}:{n}"; first = db.kv_get(kk) or None
+                if first is None: db.kv_set(kk, hw)
+                elif first != hw and seeded and _alert_on(tg) and sent.get(tg, 0) < 3:
+                    sent[tg] = sent.get(tg, 0) + 1
+                    try:
+                        await B.bot.send_photo(tg, B.photo("31_device_alert.png"),
+                            caption=f"<b>На ключе устройства {n} появилось второе устройство</b>\n\n{esc(_dev_name(d_))}\n\nЕсли это не ты, отключи устройство {n} и добавь своё заново: "
+                                    "отключится всё, что сидит на этом ключе.",
+                            reply_markup=kb([(f"Отключить устройство {n}", f"dev:kr:{n}")], [("Это я", "dev:ok")]))
+                    except Exception:
+                        logging.warning("не удалось сообщить о втором устройстве на ключе uid=%s", tg)
+            continue
         if not seeded or prev == 0 or not _alert_on(tg): continue
         if hw in {b_["hwid"] for b_ in db.blocked_list(tg)}: continue
         if sent.get(tg, 0) >= 3: continue

@@ -50,6 +50,27 @@ def connect(u, sub=None):
             [b("Не работает?", "faq:open")],
             [b("Назад", "go:start")]]))
 
+def connect_keys(u, keys, sel, can_add):
+    """Экран «Подключиться» при отдельных ключах: keys = [(номер, ссылка)], sel = выбранное устройство."""
+    sub = dict(keys)[sel]
+    many = len(keys) > 1
+    text = ("<b>Подключение за 3 шага</b>\n\n1. Установи Happ или Incy\n2. Нажми «Добавить в Happ» или «Добавить в Incy»\n3. Включи VPN и пользуйся\n\n"
+            + (f"Сейчас показан ключ для <b>устройства {sel}</b>. У каждого устройства свой ключ: выбери нужное ниже или добавь новое."
+               if many else "У каждого устройства свой ключ. Для нового устройства нажми «Добавить устройство»." if can_add else
+               "Это ключ для твоего устройства."))
+    rows = [[b("Скачать Happ", "url:" + config.HAPP_URL), b("Скачать Incy", "url:" + config.INCY_URL)]]
+    if config.OPEN_URL:
+        rows.append([b("Добавить в Happ", "url:" + config.OPEN_URL.format(app="happ", sub=quote(sub, safe=""))),
+                     b("Добавить в Incy", "url:" + config.OPEN_URL.format(app="incy", sub=quote(sub, safe="")))])
+    rows.append([Btn(text="Скопировать ссылку", copy_text=CopyTextButton(text=sub))])
+    if many:
+        btns = [b(("✓ " if n == sel else "") + f"Устройство {n}", f"conn:k:{n}") for n, _ in keys]
+        rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
+    if can_add:
+        rows.append([b("Добавить устройство", "conn:new")])
+    rows += [[b("Устройства", "dev:open"), b("Не работает?", "faq:open")], [b("Назад", "go:start")]]
+    return ("03_connect.png", text, Markup(inline_keyboard=rows))
+
 def connect_error(u):
     return ("03_connect.png",
         "<b>Не удалось получить ссылку</b>\n\nСервер подключения не ответил. Обычно это проходит за минуту. "

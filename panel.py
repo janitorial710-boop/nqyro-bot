@@ -116,7 +116,7 @@ async def _find(uid: int):
 
 async def _create(uid: int, until_ts: int):
     body = {"username": f"tg_{uid}", "telegramId": uid, "expireAt": _iso(until_ts),
-            "hwidDeviceLimit": config.HWID_LIMIT, "trafficLimitBytes": 0,
+            "hwidDeviceLimit": 1 if config.PER_DEVICE_KEYS else config.HWID_LIMIT, "trafficLimitBytes": 0,
             "trafficLimitStrategy": "NO_RESET", "status": "ACTIVE"}
     if config.PANEL_SQUAD:
         body["activeInternalSquads"] = [config.PANEL_SQUAD]
@@ -125,7 +125,7 @@ async def _create(uid: int, until_ts: int):
         raise RuntimeError(f"panel create {st}: {data}")
     return _as_user(data)
 
-async def _sync(uid: int, until_ts: int):
+async def _sync_main(uid: int, until_ts: int):
     """Создаёт пользователя или выставляет ему дату окончания и статус. Возвращает объект пользователя.
     Заблокированный админом (/ban) остаётся в статусе DISABLED, пока его не разблокируют."""
     banned = db.is_banned(uid)
@@ -143,6 +143,13 @@ async def _sync(uid: int, until_ts: int):
             or (want == "EXPIRED" and st_now == "DISABLED"))
     if need:
         return _as_user(await _patch_user(u, {"expireAt": _iso(until_ts), "status": want}))
+    return u
+
+async def _sync(uid: int, until_ts: int):
+    """Синхронизирует основного пользователя, а потом и его дополнительные ключи (срок и статус копируются с основного)."""
+    u = await _sync_main(uid, until_ts)
+    if db.keys_list(uid):
+        await sync_keys(uid, until_ts)
     return u
 
 def _fallback_link(uid: int):
@@ -243,20 +250,26 @@ async def hwid_all(page: int = 500, max_pages: int = 40):
         start += page
     return out
 
-async def tg_by_ident(ident):
-    """Telegram ID человека по id (или uuid) пользователя панели. None, если не удалось определить."""
+async def tg_n_by_ident(ident):
+    """(Telegram ID человека, номер ключа устройства) по id или uuid пользователя панели. Основной ключ это 1. (None, 1), если не удалось определить."""
     import re
     st, data = await _call("GET", f"/api/users/{ident}")
     u = _as_user(data) if st == 200 else None
-    if not isinstance(u, dict): return None
-    m = re.fullmatch(r"tg_(\d+)", str(u.get("username") or ""))
-    if m: return int(m.group(1))
+    if not isinstance(u, dict): return None, 1
+    m = re.fullmatch(r"tg_(\d+)(?:_d(\d+))?", str(u.get("username") or ""))
+    if m: return int(m.group(1)), int(m.group(2) or 1)
     t = u.get("telegramId")
-    return int(t) if isinstance(t, (int, str)) and str(t).isdigit() else None
+    return (int(t) if isinstance(t, (int, str)) and str(t).isdigit() else None), 1
+
+async def tg_by_ident(ident):
+    """Telegram ID человека по id (или uuid) пользователя панели. None, если не удалось определить."""
+    return (await tg_n_by_ident(ident))[0]
 
 async def apply_limit(uid: int):
     """Выставляет в панели лимит устройств: HWID_LIMIT плюс действующие докупленные слоты."""
     want = config.HWID_LIMIT + db.slots_active(uid)
+    if config.PER_DEVICE_KEYS:   # лимит устройств теперь это число ключей, а не HWID одного пользователя
+        return want
     u = await _need_user(uid)
     if (u.get("hwidDeviceLimit") or 0) != want:
         await _patch_user(u, {"hwidDeviceLimit": want})
@@ -273,21 +286,23 @@ async def set_hwid_limit(uid: int, limit: int):
 
 async def revoke_sub(uid: int):
     """Перевыпускает ссылку подписки (старая перестаёт работать). Возвращает новую ссылку или None."""
-    return await rotate_keys(uid, new_link=True)
-
-async def rotate_keys(uid: int, new_link: bool = False):
-    """Меняет ключи доступа человека (vless uuid и пароли): уже подключённые устройства сразу отваливаются,
-    а старые конфиги в приложениях перестают работать. Отвязка HWID этого не делает: HWID нужен только при
-    загрузке подписки, а само соединение идёт по общему ключу.
-    new_link=False: ссылка подписки остаётся прежней, остальные устройства подхватят новые ключи при обновлении подписки.
-    new_link=True: ссылка тоже новая, старая мертва совсем. Возвращает ссылку подписки или None."""
     u = await _need_user(uid)
-    data = await _ok("POST", f"/api/users/{u['uuid']}/actions/revoke", json={"revokeOldSubscription": bool(new_link)})
+    data = await _ok("POST", f"/api/users/{u['uuid']}/actions/revoke", json={})
+    for k in db.keys_list(uid):   # новая ссылка меняет и ключи остальных устройств, старые перестают работать везде
+        try:
+            ku = await _find_by_name(k["username"])
+            if ku: await _ok("POST", f"/api/users/{ku['uuid']}/actions/revoke", json={})
+        except Exception: logging.exception("revoke key uid=%s n=%s", uid, k["n"])
     return data.get("subscriptionUrl") if isinstance(data, dict) else None
 
 async def reset_traffic(uid: int):
     u = await _need_user(uid)
     await _ok("POST", f"/api/users/{u['uuid']}/actions/reset-traffic")
+    for k in db.keys_list(uid):
+        try:
+            ku = await _find_by_name(k["username"])
+            if ku: await _ok("POST", f"/api/users/{ku['uuid']}/actions/reset-traffic")
+        except Exception: logging.exception("reset_traffic key uid=%s n=%s", uid, k["n"])
 
 async def delete_user(uid: int) -> bool:
     """Удаляет человека из панели. False, если его там не было."""
@@ -297,6 +312,7 @@ async def delete_user(uid: int) -> bool:
     if not u:
         return False
     await _ok("DELETE", f"/api/users/{u['uuid']}")
+    await _purge_keys(uid)
     return True
 
 async def system_stats():
@@ -397,3 +413,121 @@ async def diagnose(uid: int) -> dict:
         except Exception as e:
             out["devices_err"] = str(e)
     return out
+
+
+# ---------- отдельные ключи на устройство ----------
+# Основной пользователь tg_<id> это устройство 1. Остальные устройства: пользователи tg_<id>_d<n> с лимитом HWID 1.
+# Срок и статус у них всегда копируются с основного, поэтому дни начисляются только основному.
+def _key_name(uid, n):
+    return f"tg_{uid}_d{n}"
+
+async def _find_by_name(name):
+    st, data = await _call("GET", f"/api/users/by-username/{name}")
+    if st == 200 and data:
+        u = _as_user(data)
+        return u if isinstance(u, dict) and u.get("uuid") else None
+    if _is_outage(st):
+        raise RuntimeError(f"panel find {name} HTTP {st}")
+    return None
+
+def _want_status(uid, until_ts):
+    if db.is_banned(uid): return "DISABLED"
+    return "ACTIVE" if until_ts > time.time() else "EXPIRED"
+
+async def sync_keys(uid: int, until_ts: int):
+    """Подтягивает срок и статус всех дополнительных ключей человека. Ключ, которого нет в панели, убирается из базы бота."""
+    want = _want_status(uid, until_ts)
+    for k in db.keys_list(uid):
+        try:
+            u = await _find_by_name(k["username"])
+            if u is None:
+                db.key_del(uid, k["n"]); continue
+            cur = _parse_iso(u["expireAt"]) if u.get("expireAt") else 0
+            if abs(cur - until_ts) > 60 or u.get("status") != want:
+                await _patch_user(u, {"expireAt": _iso(until_ts), "status": want})
+        except Exception:
+            logging.exception("sync_keys uid=%s n=%s", uid, k["n"])
+
+async def create_key(uid: int):
+    """Заводит ключ для ещё одного устройства. Возвращает (номер, ссылка подписки). Бросает исключение, если лимит исчерпан."""
+    main = await _need_user(uid)
+    if 1 + len(db.keys_list(uid)) >= config.HWID_LIMIT + db.slots_active(uid):
+        raise RuntimeError("лимит устройств исчерпан")
+    n = db.key_free_n(uid)
+    until = db.get_user(uid)["sub_until"]
+    name = _key_name(uid, n)
+    squads = [config.PANEL_SQUAD] if config.PANEL_SQUAD else [s["uuid"] if isinstance(s, dict) else s for s in (main.get("activeInternalSquads") or [])]
+    body = {"username": name, "expireAt": _iso(until), "hwidDeviceLimit": 1, "trafficLimitBytes": 0,
+            "trafficLimitStrategy": "NO_RESET", "status": _want_status(uid, until),
+            "description": f"устройство {n} человека tg_{uid}"}
+    if squads: body["activeInternalSquads"] = squads
+    st, data = await _call("POST", "/api/users", json=body)
+    if st == 400:   # на случай, если панель не принимает description
+        body.pop("description"); st, data = await _call("POST", "/api/users", json=body)
+    if st >= 300:
+        raise RuntimeError(f"panel create key {st}: {data}")
+    u = _as_user(data)
+    db.key_add(uid, n, name)
+    db.kv_set(f"devkey:{uid}:{n}", "")
+    return n, (u or {}).get("subscriptionUrl")
+
+async def ban_key(uid: int, n: int):
+    """Удаляет ключ устройства n из панели: устройство отваливается сразу, остальные ключи человека не затронуты."""
+    k = next((x for x in db.keys_list(uid) if x["n"] == n), None)
+    if not k:
+        raise RuntimeError("нет такого ключа (устройство 1 это основной ключ, его отдельно не удалить)")
+    u = await _find_by_name(k["username"])
+    if u:
+        await _ok("DELETE", f"/api/users/{u['uuid']}")
+    db.key_del(uid, n)
+    db.kv_set(f"devkey:{uid}:{n}", "")
+
+async def keys_info(uid: int):
+    """[(номер, ссылка, статус)]: основной ключ (1) и дополнительные."""
+    main = await _need_user(uid)
+    out = [(1, main.get("subscriptionUrl"), main.get("status"))]
+    for k in db.keys_list(uid):
+        u = await _find_by_name(k["username"])
+        out.append((k["n"], (u or {}).get("subscriptionUrl"), (u or {}).get("status") or "нет в панели"))
+    return out
+
+
+async def _purge_keys(uid: int):
+    """Удаляет все дополнительные ключи человека из панели и из базы бота."""
+    for k in db.keys_list(uid):
+        try:
+            ku = await _find_by_name(k["username"])
+            if ku: await _ok("DELETE", f"/api/users/{ku['uuid']}")
+            db.key_del(uid, k["n"])
+        except Exception: logging.exception("purge key uid=%s n=%s", uid, k["n"])
+
+
+async def _devs_of(u):
+    data = await _ok("GET", f"/api/hwid/devices/{u['uuid']}")
+    return ((data.get("devices") if isinstance(data, dict) else data) or [])
+
+async def keys_devices(uid: int):
+    """[(номер, статус, [устройства этого ключа])]: основной ключ (1) и дополнительные."""
+    main = await _need_user(uid)
+    out = [(1, main.get("status"), await _devs_of(main))]
+    for k in db.keys_list(uid):
+        u = await _find_by_name(k["username"])
+        out.append((k["n"], (u or {}).get("status") or "нет в панели", await _devs_of(u) if u else []))
+    return out
+
+async def revoke_main(uid: int):
+    """Отключает устройство 1: у основного ключа новая ссылка и ключ, его устройства отвязываются. Ключи остальных устройств не затрагиваются."""
+    u = await _need_user(uid)
+    await _ok("POST", f"/api/users/{u['uuid']}/actions/revoke", json={})
+    try:
+        await _ok("POST", "/api/hwid/devices/delete-all", json=_who_body(u))
+    except Exception:
+        logging.exception("revoke_main: не удалось отвязать HWID uid=%s", uid)
+
+async def tighten_main(uid: int):
+    """Лимит HWID основного ключа становится 1, если на нём сейчас не больше одного устройства (чтобы не отрезать старых людей с несколькими)."""
+    u = await _need_user(uid)
+    if (u.get("hwidDeviceLimit") or 0) == 1:
+        return
+    if len(await _devs_of(u)) <= 1:
+        await _patch_user(u, {"hwidDeviceLimit": 1})

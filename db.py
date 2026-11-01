@@ -780,3 +780,24 @@ def segment_ids(seg):
             "new7": "created>?", "new30": "created>?", "paid": paid, "trialonly": f"trial_used=1 AND NOT {paid}"}[seg]
     params = {"new7": (now - 7 * 86400,), "new30": (now - 30 * 86400,)}.get(seg, (now,) if "?" in cond else ())
     return [r["id"] for r in con.execute(f"SELECT id FROM users WHERE COALESCE(banned,0)=0 AND {cond}", params).fetchall()]
+
+
+# ---------- отдельные ключи на устройство: доп. пользователи в панели (tg_<id>_d<n>), основной tg_<id> это устройство 1 ----------
+con.executescript("""
+CREATE TABLE IF NOT EXISTS dev_keys(user_id INTEGER, n INTEGER, username TEXT, created INTEGER, PRIMARY KEY(user_id, n));
+""")
+
+def keys_list(uid):
+    return con.execute("SELECT * FROM dev_keys WHERE user_id=? ORDER BY n", (uid,)).fetchall()
+
+def key_add(uid, n, username):
+    con.execute("INSERT OR REPLACE INTO dev_keys(user_id,n,username,created) VALUES(?,?,?,?)", (uid, n, username, int(time.time()))); con.commit()
+
+def key_del(uid, n):
+    con.execute("DELETE FROM dev_keys WHERE user_id=? AND n=?", (uid, n)); con.commit()
+
+def key_free_n(uid):
+    used = {r["n"] for r in keys_list(uid)}
+    n = 2
+    while n in used: n += 1
+    return n

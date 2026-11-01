@@ -97,3 +97,7 @@ WINBACK_PERCENT = int(os.getenv("WINBACK_PERCENT", "20"))            # разм�
 WINBACK_AFTER_DAYS = int(os.getenv("WINBACK_AFTER_DAYS", "14"))      # через сколько дней после конца подписки писать
 WINBACK_WINDOW_DAYS = int(os.getenv("WINBACK_WINDOW_DAYS", "7"))     # кому писать: ушли не раньше, чем AFTER+WINDOW дней назад (старых не трогаем)
 WINBACK_HOURS = int(os.getenv("WINBACK_HOURS", "72"))                # сколько часов действует скидка
+
+# Отдельный ключ на каждое устройство (см. panel.create_key). 0: всё как раньше, один ключ на всех устройств человека.
+# 1: «Подключиться» и «Устройства» работают по устройствам, бан устройства отключает только его.
+PER_DEVICE_KEYS = os.getenv("PER_DEVICE_KEYS", "0") == "1"
