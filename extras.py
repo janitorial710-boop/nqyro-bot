@@ -181,7 +181,9 @@ async def connect_screen(uid, sel=1):
     keys = [(n, s) for n, s, st in info if s]
     if sel not in dict(keys): sel = keys[0][0] if keys else 1
     if not keys: keys = [(1, sub1)]
-    can_add = len(keys) < config.HWID_LIMIT + db.slots_active(uid)
+    try: used = await panel.device_count(uid)
+    except Exception: used = len(keys)
+    can_add = max(used, len(keys)) < config.HWID_LIMIT + db.slots_active(uid)
     return screens.connect_keys(u, keys, sel, can_add)
 
 @router.callback_query(F.data.startswith("conn:k:"))
@@ -214,7 +216,7 @@ def _keys_dev_line(devs):
     return "; ".join(_dev_name(x) for x in devs[:3]) if devs else "ещё не подключено"
 
 async def dev_screen_keys(uid, note=""):
-    """Экран «Устройства» при отдельных ключах."""
+    """Экран «Устройства» при отдельных ключах. Каждое подключённое устройство своей строкой; у старых людей на ключе 1 их может быть несколько."""
     try:
         ks = await panel.keys_devices(uid)
     except Exception as e:
@@ -226,12 +228,26 @@ async def dev_screen_keys(uid, note=""):
         if uid in config.ADMIN_IDS: text += f"\n\nПричина (видно только тебе): {esc(e)}"
         return ("22_devices.png", text, kb([("Обновить", "dev:open")], [("Назад", "go:profile")]))
     allowed = config.HWID_LIMIT + db.slots_active(uid); act = db.slots_active(uid)
-    L = [f"<b>Устройства: {len(ks)} из {allowed}</b>" + (f" (докуплено: {act})" if act else ""), ""]
-    L += [f"{n}. {esc(_keys_dev_line(devs))}" + (f" · с {_dev_since(devs[0])}" if devs and _dev_since(devs[0]) else "") for n, st, devs in ks]
+    total = sum(max(1, len(devs)) for _, _, devs in ks)   # ключ без устройства всё равно занимает место
+    L = [f"<b>Устройства: {total} из {allowed}</b>" + (f" (докуплено: {act})" if act else ""), ""]
+    shared = False
+    for n, st, devs in ks:
+        if not devs:
+            L.append(f"{n}. ещё не подключено")
+            continue
+        for k_, d_ in enumerate(devs):
+            since = _dev_since(d_)
+            L.append(f"{n if k_ == 0 else '  '}. {esc(_dev_name(d_))}" + (f" · с {since}" if since else ""))
+        shared = shared or len(devs) > 1
     L += ["", "У каждого устройства свой ключ. Если отключить устройство, его ключ перестанет работать сразу, остальные устройства это не затронет."]
+    if shared:
+        L += ["", "Несколько устройств сидят на одном старом ключе, и отключить их можно только вместе. Чтобы у каждого был свой ключ: нажми «Добавить устройство» и подключи его по новой ссылке."]
     if note: L = [note, ""] + L
-    rows = [[(f"Отключить {n}. {_keys_dev_line(devs)[:28]}", f"dev:kr:{n}")] for n, st, devs in ks]
-    if len(ks) < allowed:
+    rows = []
+    for n, st, devs in ks:
+        label = (_dev_name(devs[0]) if len(devs) == 1 else f"все {len(devs)} устройства" if devs else "ещё не подключено")
+        rows.append([(f"Отключить {n}. {label}"[:42], f"dev:kr:{n}")])
+    if total < allowed:
         rows.append([("Добавить устройство", "conn:new")])
     if config.SLOT_PRICE > 0 and act < config.SLOT_MAX:
         rows.append([(f"Докупить устройство · {config.SLOT_PRICE} ₽", "slot:buy")])

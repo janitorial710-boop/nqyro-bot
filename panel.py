@@ -451,7 +451,9 @@ async def sync_keys(uid: int, until_ts: int):
 async def create_key(uid: int):
     """Заводит ключ для ещё одного устройства. Возвращает (номер, ссылка подписки). Бросает исключение, если лимит исчерпан."""
     main = await _need_user(uid)
-    if 1 + len(db.keys_list(uid)) >= config.HWID_LIMIT + db.slots_active(uid):
+    try: used = await device_count(uid)
+    except Exception: used = 1 + len(db.keys_list(uid))
+    if max(used, 1 + len(db.keys_list(uid))) >= config.HWID_LIMIT + db.slots_active(uid):
         raise RuntimeError("лимит устройств исчерпан")
     n = db.key_free_n(uid)
     until = db.get_user(uid)["sub_until"]
@@ -478,6 +480,9 @@ async def ban_key(uid: int, n: int):
         raise RuntimeError("нет такого ключа (устройство 1 это основной ключ, его отдельно не удалить)")
     u = await _find_by_name(k["username"])
     if u:
+        try: await _patch_user(u, {"status": "DISABLED"})   # сначала выключаем, чтобы клиент не успел переподключиться
+        except Exception: logging.exception("ban_key: не удалось выключить ключ uid=%s n=%s", uid, n)
+        await drop_sessions(u)
         await _ok("DELETE", f"/api/users/{u['uuid']}")
     db.key_del(uid, n)
     db.kv_set(f"devkey:{uid}:{n}", "")
@@ -519,6 +524,7 @@ async def revoke_main(uid: int):
     """Отключает устройство 1: у основного ключа новая ссылка и ключ, его устройства отвязываются. Ключи остальных устройств не затрагиваются."""
     u = await _need_user(uid)
     await _ok("POST", f"/api/users/{u['uuid']}/actions/revoke", json={})
+    await drop_sessions(u)
     try:
         await _ok("POST", "/api/hwid/devices/delete-all", json=_who_body(u))
     except Exception:
@@ -531,3 +537,30 @@ async def tighten_main(uid: int):
         return
     if len(await _devs_of(u)) <= 1:
         await _patch_user(u, {"hwidDeviceLimit": 1})
+
+
+async def drop_sessions(u):
+    """Рвёт уже установленные соединения пользователя на всех нодах. Удаление или отключение ключа само по себе активную сессию
+    может не оборвать, она живёт до переподключения клиента. Эндпоинт зовётся по-разному в версиях панели (3.x: /api/connections,
+    раньше /api/ip-control), поэтому пробуем варианты по очереди. Ошибки не критичны: пишем в лог и идём дальше."""
+    n = _num_id(u)
+    ident = {"by": "userIds", "userIds": [n]} if n is not None else None
+    if ident is None:
+        logging.warning("drop_sessions: у пользователя нет числового id, пропускаю")
+        return False
+    body = {"dropBy": ident, "targetNodes": {"target": "allNodes"}}
+    for path in ("/api/connections/drop", "/api/connections/drop-connections", "/api/ip-control/drop-connections"):
+        try:
+            st, data = await _call("POST", path, json=body)
+        except Exception:
+            logging.exception("drop_sessions %s", path); continue
+        if 200 <= st < 300:
+            logging.info("drop_sessions ok via %s for id=%s", path, n); return True
+        logging.info("drop_sessions %s -> %s %s", path, st, str(data)[:200])
+    logging.warning("drop_sessions: ни один эндпоинт не подошёл для id=%s (см. строки выше)", n)
+    return False
+
+
+async def device_count(uid: int) -> int:
+    """Сколько мест занято: подключённые устройства на всех ключах, а ключ без устройства считается за одно."""
+    return sum(max(1, len(devs)) for _, _, devs in await keys_devices(uid))
