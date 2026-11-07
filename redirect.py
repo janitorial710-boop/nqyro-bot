@@ -7,7 +7,7 @@ Telegram не принимает ссылки happ:// и incy:// в кнопка
 import asyncio, hmac, html, logging
 from urllib.parse import urlparse
 from aiohttp import web
-import config, db, panel
+import config, db, miniapp, panel
 
 ON_PAYMENT = None   # сюда bot.py кладёт функцию проверки платежа (она сама сверяется с ЮKassa)
 _tasks = set()
@@ -74,6 +74,7 @@ async def start_server():
         return None
     app = web.Application()
     app.add_routes([web.get("/open/{app}", open_app), web.get("/health", health), web.post("/yk/{secret}", yk_hook)])
+    app.add_routes(miniapp.routes())   # админка-мини-приложение: /app и /api/app/*
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, config.WEB_HOST, config.WEB_PORT).start()

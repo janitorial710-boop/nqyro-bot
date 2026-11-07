@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>NQYRO Admin</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#07090a;--card:#0f1412;--card2:#151c19;--line:#1f2a25;--tx:#eef3ec;--mut:#8b978d;--lime:#c6ff1a;--red:#ff5d5d;--ok:#6dff9c}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--tx);font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;font-size:15px}
+body{padding:0 14px calc(86px + env(safe-area-inset-bottom));min-height:100vh;
+background:radial-gradient(600px 300px at 80% -80px,rgba(198,255,26,.10),transparent 70%),var(--bg)}
+h1{font-size:22px;margin:18px 2px 12px;letter-spacing:.2px}
+h2{font-size:13px;margin:20px 2px 8px;color:var(--mut);text-transform:uppercase;letter-spacing:1.4px;font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.k{color:var(--mut);font-size:12px}.v{font-size:24px;font-weight:700;margin-top:4px}.v small{font-size:13px;color:var(--mut);font-weight:500}
+.lime{color:var(--lime)}.red{color:var(--red)}.ok{color:var(--ok)}.mut{color:var(--mut)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}.row .l{min-width:0}.row .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .s{color:var(--mut);font-size:12px;margin-top:2px}.row .r{text-align:right;white-space:nowrap}
+.tap{cursor:pointer}.tap:active{opacity:.6}
+input{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;color:var(--tx);font-size:16px;outline:none}
+input:focus{border-color:var(--lime)}
+.btn{display:inline-block;border:1px solid var(--line);background:var(--card2);color:var(--tx);border-radius:12px;padding:11px 14px;font-size:14px;font-weight:600;margin:4px 6px 4px 0}
+.btn:active{opacity:.6}.btn.p{background:var(--lime);color:#0a1200;border-color:var(--lime)}.btn.d{color:var(--red);border-color:#3a1f1f}
+.pill{display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;background:#1b2520;color:var(--mut);margin-left:6px;vertical-align:2px}
+.pill.on{background:rgba(109,255,156,.14);color:var(--ok)}.pill.off{background:rgba(255,93,93,.14);color:var(--red)}
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;gap:6px;padding:8px 10px calc(8px + env(safe-area-inset-bottom));
+background:rgba(7,9,10,.92);backdrop-filter:blur(14px);border-top:1px solid var(--line)}
+nav div{flex:1;text-align:center;padding:9px 0;border-radius:12px;color:var(--mut);font-size:12px;font-weight:600}
+nav div b{display:block;font-size:19px;font-weight:400;margin-bottom:2px}
+nav div.on{color:var(--lime);background:rgba(198,255,26,.08)}
+.bars{display:flex;align-items:flex-end;gap:4px;height:84px;margin-top:10px}
+.bars i{flex:1;background:linear-gradient(var(--lime),#6a9a00);border-radius:4px 4px 0 0;min-height:3px;opacity:.9}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:5}
+.sheet>div{position:absolute;left:0;right:0;bottom:0;max-height:92vh;overflow:auto;background:var(--bg);border-top:1px solid var(--line);
+border-radius:22px 22px 0 0;padding:16px 14px calc(24px + env(safe-area-inset-bottom))}
+.x{float:right;color:var(--mut);font-size:26px;line-height:1;padding:0 6px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(96px + env(safe-area-inset-bottom));background:var(--lime);color:#0a1200;
+padding:10px 16px;border-radius:12px;font-weight:700;z-index:9;display:none;max-width:90%}
+.toast.e{background:var(--red);color:#fff}
+.empty{color:var(--mut);text-align:center;padding:30px 0}
+</style></head><body>
+<div id="view"></div>
+<div class="sheet" id="sheet"><div id="sheetc"></div></div>
+<div class="toast" id="toast"></div>
+<nav id="nav">
+<div data-t="today" class="on"><b>◔</b>Сегодня</div><div data-t="users"><b>☺</b>Клиенты</div>
+<div data-t="nodes"><b>◉</b>Ноды</div><div data-t="more"><b>☰</b>Ещё</div></nav>
+<script>
+const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();tg.setHeaderColor&&tg.setHeaderColor('#07090a');tg.setBackgroundColor&&tg.setBackgroundColor('#07090a')}
+const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const rub=n=>Math.round(n||0).toLocaleString('ru-RU')+' ₽';
+const fd=ts=>ts?new Date(ts*1000).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'2-digit'}):'—';
+const fdt=ts=>ts?new Date(ts*1000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+function toast(t,err){const e=$('#toast');e.textContent=t;e.className='toast'+(err?' e':'');e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}
+async function api(path,opt={}){
+  const r=await fetch('/api/app/'+path,{method:opt.body?'POST':'GET',headers:{'X-Init-Data':tg?tg.initData:'','Content-Type':'application/json'},body:opt.body?JSON.stringify(opt.body):undefined});
+  if(!r.ok){let m=await r.text();try{m=JSON.parse(m).error||m}catch(e){} throw new Error(r.status===401||r.status===403?'Нет доступа: открой через бота, и ты должен быть владельцем':m)}
+  return r.json()}
+function name(u){return u.name||(u.username?'@'+u.username:'ID '+u.id)}
+const days=ts=>Math.ceil((ts-Date.now()/1000)/86400);
+function until(u){if(u.banned)return '<span class="red">заблокирован</span>';if(!u.until)return '<span class="mut">не подключался</span>';
+  const d=days(u.until);return d>0?`<span class="ok">до ${fd(u.until)}</span> <span class="mut">(${d} дн.)</span>`:`<span class="red">закончилась ${fd(u.until)}</span>`}
+
+let tab='today';
+document.querySelectorAll('#nav div').forEach(b=>b.onclick=()=>{tab=b.dataset.t;document.querySelectorAll('#nav div').forEach(x=>x.classList.toggle('on',x===b));go()});
+function go(){({today,users:usersTab,nodes,more})[tab]()}
+function load(t){$('#view').innerHTML='<h1>'+t+'</h1><div class="empty">Загрузка…</div>'}
+function fail(e){$('#view').innerHTML='<h1>Ошибка</h1><div class="card red">'+esc(e.message)+'</div><div class="btn" onclick="go()">Повторить</div>'}
+
+async function today(){load('Сегодня');try{
+  const d=await api('overview'),s=d.stats,p=d.profit,mx=Math.max(1,...d.chart.map(x=>x[1]));
+  const net=x=>x.revenue-x.refunds-x.costs;
+  $('#view').innerHTML=`<h1>Сегодня</h1>
+  <div class="grid"><div class="card"><div class="k">Выручка за сутки</div><div class="v lime">${rub(p.d1.revenue)}</div></div>
+  <div class="card"><div class="k">Оплат за сутки</div><div class="v">${p.d1.pay_n}</div></div>
+  <div class="card"><div class="k">Новых за сутки</div><div class="v">+${s.new_day}</div></div>
+  <div class="card"><div class="k">Подписка активна</div><div class="v">${s.active}<small> из ${s.users}</small></div></div></div>
+  <h2>Деньги</h2><div class="card">
+  ${[['7 дней',p.d7],['30 дней',p.d30]].map(([n,x])=>`<div class="row"><div class="l"><div class="t">${n}</div><div class="s">выручка ${rub(x.revenue)} · расходы ${rub(x.costs)}${x.refunds?` · возвраты ${rub(x.refunds)}`:''}</div></div><div class="r ${net(x)>=0?'ok':'red'}"><b>${rub(net(x))}</b></div></div>`).join('')}
+  <div class="bars">${d.chart.map(([dt,v])=>`<i title="${esc(dt)}: ${rub(v)}" style="height:${Math.max(4,v/mx*100)}%"></i>`).join('')}</div>
+  <div class="k" style="margin-top:6px">Выручка по дням, последние 14 дней</div></div>
+  <h2>Внимание</h2><div class="card">
+  <div class="row"><div class="l"><div class="t">Подписка кончается за 3 дня</div></div><div class="r"><b>${d.expiring}</b></div></div>
+  <div class="row"><div class="l"><div class="t">Могут продлиться за неделю</div><div class="s">потенциал по прошлым тарифам</div></div><div class="r"><b>${d.forecast.payers}</b> · ${rub(d.forecast.potential)}</div></div>
+  <div class="row"><div class="l"><div class="t">Ни разу не подключались</div></div><div class="r"><b>${s.never}</b></div></div>
+  <div class="row"><div class="l"><div class="t">Заблокировано</div></div><div class="r"><b>${s.banned}</b></div></div></div>
+  <h2>Всего</h2><div class="card">
+  <div class="row"><div class="l"><div class="t">Оплат деньгами</div><div class="s">${s.payers} чел.</div></div><div class="r"><b>${rub(s.pay_sum)}</b> · ${s.pay_n}</div></div>
+  <div class="row"><div class="l"><div class="t">Балансы у людей</div></div><div class="r"><b>${rub(s.balances)}</b></div></div></div>`}catch(e){fail(e)}}
+
+let uq='';
+async function usersTab(){
+  $('#view').innerHTML=`<h1>Клиенты</h1><input id="q" placeholder="ID, @ник или имя" value="${esc(uq)}" autocomplete="off"><div id="ul"></div>`;
+  const q=$('#q');let t;q.oninput=()=>{uq=q.value;clearTimeout(t);t=setTimeout(list,300)};list()}
+async function list(){const ul=$('#ul');if(!ul)return;try{
+  const d=await api('users?q='+encodeURIComponent(uq));
+  ul.innerHTML=d.users.length?`<div class="card" style="margin-top:12px">`+d.users.map(u=>`<div class="row tap" onclick="card(${u.id})"><div class="l"><div class="t">${esc(name(u))}</div><div class="s">${until(u)}</div></div><div class="r mut">›</div></div>`).join('')+`</div>`:'<div class="empty">Никого не нашёл</div>'}catch(e){ul.innerHTML='<div class="card red" style="margin-top:12px">'+esc(e.message)+'</div>'}}
+
+function open_(){$('#sheet').style.display='block'}
+function close_(){$('#sheet').style.display='none'}
+$('#sheet').onclick=e=>{if(e.target.id==='sheet')close_()};
+async function card(id){open_();$('#sheetc').innerHTML='<div class="empty">Загрузка…</div>';try{
+  const d=await api('user/'+id),u=d.user;
+  const dev=d.devices_err?`<div class="card red">${esc(d.devices_err)}</div>`:
+   (d.devices.length?'<div class="card">'+d.devices.map(k=>{
+     const n=k.devices.length;
+     return `<div class="row"><div class="l"><div class="t">${d.per_device?'Ключ '+k.n:'Устройства'}${k.status&&k.status!=='ACTIVE'?` <span class="pill off">${esc(k.status)}</span>`:''}</div>
+     <div class="s">${n?k.devices.map(x=>esc(x.name)).join('<br>'):'ещё не подключено'}</div></div>
+     ${d.per_device?`<div class="r"><span class="btn d" onclick="keyOff(${id},${k.n})">Отключить</span></div>`:''}</div>`}).join('')+'</div>':'<div class="empty">Нет устройств</div>');
+  $('#sheetc').innerHTML=`<span class="x" onclick="close_()">×</span><h1 style="margin-top:2px">${esc(name(u))}</h1>
+  <div class="mut" style="margin:-6px 2px 12px">ID <b>${u.id}</b>${u.username?' · @'+esc(u.username):''}${d.src?' · источник '+esc(d.src):''}${d.ref?' · пригласил '+d.ref:''}</div>
+  <div class="card"><div class="row"><div class="l"><div class="t">Подписка</div></div><div class="r">${until(u)}</div></div>
+  <div class="row"><div class="l"><div class="t">Оплат деньгами</div></div><div class="r"><b>${d.pay_n}</b> · ${rub(d.pay_sum)}</div></div>
+  <div class="row"><div class="l"><div class="t">Баланс</div></div><div class="r">${rub(u.balance)}</div></div>
+  <div class="row"><div class="l"><div class="t">В боте с</div></div><div class="r">${fd(d.created)}${d.trial?' · брал пробник':''}</div></div></div>
+  <h2>Выдать дни</h2><div>${[1,7,30,90].map(x=>`<span class="btn p" onclick="give(${id},${x})">+${x}</span>`).join('')}<span class="btn" onclick="giveCustom(${id})">Своё…</span></div>
+  <h2>Устройства</h2>${dev}
+  <h2>Платежи</h2>${d.payments.length?'<div class="card">'+d.payments.map(p=>`<div class="row"><div class="l"><div class="t">${esc(p.plan)}</div><div class="s">${fdt(p.ts)} · ${esc(p.method)}</div></div><div class="r"><b>${rub(p.amount)}</b></div></div>`).join('')+'</div>':'<div class="empty">Платежей нет</div>'}
+  <h2>Действия</h2><div><span class="btn ${u.banned?'':'d'}" onclick="ban(${id},${!u.banned})">${u.banned?'Разблокировать':'Заблокировать'}</span></div>`}catch(e){$('#sheetc').innerHTML='<span class="x" onclick="close_()">×</span><div class="card red">'+esc(e.message)+'</div>'}}
+function confirm_(t,f){tg&&tg.showConfirm?tg.showConfirm(t,ok=>ok&&f()):confirm(t)&&f()}
+function give(id,d){confirm_(`Выдать ${d} дн. человеку ${id}?`,async()=>{try{const r=await api(`user/${id}/give`,{body:{days:d}});toast(r.panel_error?'Выдано, но панель не ответила':'Выдано +'+d+' дн.',!!r.panel_error);card(id)}catch(e){toast(e.message,1)}})}
+function giveCustom(id){const v=prompt('Сколько дней выдать? (1–3650)');const d=parseInt(v);if(d>=1&&d<=3650)give(id,d)}
+function ban(id,flag){confirm_(flag?`Заблокировать ${id}?`:`Разблокировать ${id}?`,async()=>{try{const r=await api(`user/${id}/ban`,{body:{flag}});toast(r.panel_error?'Готово, но панель не ответила':(flag?'Заблокирован':'Разблокирован'),!!r.panel_error);card(id)}catch(e){toast(e.message,1)}})}
+function keyOff(id,n){confirm_(`Отключить ключ ${n}? Устройство отвалится, остальные не затронутся.`,async()=>{try{await api(`user/${id}/key/${n}/off`,{body:{}});toast('Отключено');card(id)}catch(e){toast(e.message,1)}})}
+
+async function nodes(){load('Ноды');try{
+  const d=await api('nodes'),bad=d.nodes.filter(n=>!n.connected||!n.xray||n.disabled).length;
+  $('#view').innerHTML=`<h1>Ноды</h1><div class="card"><div class="k">Состояние</div><div class="v ${bad?'red':'ok'}">${bad?bad+' требуют внимания':'всё работает'}</div></div>
+  <div class="card">`+(d.nodes.map(n=>{const okk=n.connected&&n.xray&&!n.disabled;return `<div class="row"><div class="l"><div class="t">${esc(n.name)} ${n.country?`<span class="pill">${esc(n.country)}</span>`:''}</div>
+  <div class="s">${n.disabled?'выключена':!n.connected?'нет связи с панелью':!n.xray?'Xray не запущен':'работает'}</div></div><div class="r">${okk?`<span class="ok">●</span> ${n.online??0} онлайн`:'<span class="red">●</span>'}</div></div>`}).join('')||'<div class="empty">Нод нет</div>')+'</div>'}catch(e){fail(e)}}
+
+let sub='payments';
+async function more(){
+  $('#view').innerHTML=`<h1>Ещё</h1><div><span class="btn ${sub==='payments'?'p':''}" onclick="sub='payments';more()">Платежи</span><span class="btn ${sub==='log'?'p':''}" onclick="sub='log';more()">Журнал</span></div><div id="mc"><div class="empty">Загрузка…</div></div>`;
+  try{if(sub==='payments'){const d=await api('payments');
+    $('#mc').innerHTML=d.payments.length?'<div class="card" style="margin-top:8px">'+d.payments.map(p=>`<div class="row tap" onclick="card(${p.user})"><div class="l"><div class="t">${esc(p.name||(p.username?'@'+p.username:'ID '+p.user))}</div><div class="s">${fdt(p.ts)} · ${esc(p.plan)} · ${p.method==='balance'?'с баланса':esc(p.method)}</div></div><div class="r"><b>${rub(p.amount)}</b></div></div>`).join('')+'</div>':'<div class="empty">Оплат пока нет</div>'}
+  else{const d=await api('log');
+    $('#mc').innerHTML=d.log.length?'<div class="card" style="margin-top:8px">'+d.log.map(l=>`<div class="row"><div class="l"><div class="t">${esc(l.action)} ${l.target?'· '+esc(l.target):''}</div><div class="s">${fdt(l.ts)} · ${esc(l.admin)}${l.details?' · '+esc(l.details):''}</div></div></div>`).join('')+'</div>':'<div class="empty">Журнал пуст</div>'}}
+  catch(e){$('#mc').innerHTML='<div class="card red" style="margin-top:8px">'+esc(e.message)+'</div>'}}
+go();
+</script></body></html>

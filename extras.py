@@ -237,15 +237,17 @@ async def dev_screen_keys(uid, note=""):
             continue
         for k_, d_ in enumerate(devs):
             since = _dev_since(d_)
-            L.append(f"{n if k_ == 0 else '  '}. {esc(_dev_name(d_))}" + (f" · с {since}" if since else ""))
+            L.append((f"{n}. " if k_ == 0 else "     ↳ ") + esc(_dev_name(d_)) + (f" · с {since}" if since else ""))
         shared = shared or len(devs) > 1
     L += ["", "У каждого устройства свой ключ. Если отключить устройство, его ключ перестанет работать сразу, остальные устройства это не затронет."]
     if shared:
-        L += ["", "Несколько устройств сидят на одном старом ключе, и отключить их можно только вместе. Чтобы у каждого был свой ключ: нажми «Добавить устройство» и подключи его по новой ссылке."]
+        L += ["", "Несколько устройств сидят на одном старом ключе, и отключить их можно только вместе. Чтобы у каждого был свой ключ, нажми «Новые ключи» ниже: старый ключ перестанет работать, а бот сразу выдаст отдельную ссылку для каждого устройства с кнопкой автоподключения."]
     if note: L = [note, ""] + L
     rows = []
     for n, st, devs in ks:
-        label = (_dev_name(devs[0]) if len(devs) == 1 else f"все {len(devs)} устройства" if devs else "ещё не подключено")
+        if len(devs) > 1:
+            rows.append([(f"Новые ключи: разнести {len(devs)} устройства", f"dev:kr:{n}")]); continue
+        label = (_dev_name(devs[0]) if devs else "ещё не подключено")
         rows.append([(f"Отключить {n}. {label}"[:42], f"dev:kr:{n}")])
     if total < allowed:
         rows.append([("Добавить устройство", "conn:new")])
@@ -258,9 +260,18 @@ async def dev_screen_keys(uid, note=""):
 async def cb_dev_kr(c: CallbackQuery):
     n = c.data.split(":")[2]
     await c.answer()
-    await B.show(c, ("29_device_ask.png",
-        f"<b>Отключить устройство {esc(n)}?</b>\n\nЕго ключ перестанет работать сразу, и оно отвалится от VPN. Остальные твои устройства не затронутся.",
-        kb([("Да, отключить", f"dev:kry:{n}")], [("Отмена", "dev:open")])))
+    cnt = 1
+    if n == "1":
+        try: cnt = len(next((d for nn, _, d in await panel.keys_devices(c.from_user.id) if nn == 1), []))
+        except Exception: cnt = 1
+    if cnt > 1:
+        text = (f"<b>Разнести {cnt} устройства по отдельным ключам?</b>\n\nСтарый общий ключ перестанет работать, и все {cnt} устройства отключатся от VPN. "
+                f"Бот сразу выдаст отдельную ссылку для каждого: нажми на ней «Добавить в Happ» или «Добавить в Incy» на нужном устройстве, и всё подключится само.")
+        yes = "Да, разнести"
+    else:
+        text = f"<b>Отключить устройство {esc(n)}?</b>\n\nЕго ключ перестанет работать сразу, и оно отвалится от VPN. Остальные твои устройства не затронутся."
+        yes = "Да, отключить"
+    await B.show(c, ("29_device_ask.png", text, kb([(yes, f"dev:kry:{n}")], [("Отмена", "dev:open")])))
 
 @router.callback_query(F.data.startswith("dev:kry:"))
 async def cb_dev_kry(c: CallbackQuery):
@@ -269,6 +280,10 @@ async def cb_dev_kry(c: CallbackQuery):
     except ValueError: return await c.answer()
     if time.time() - int(db.kv_get(f"devrm:{uid}") or 0) < 5:
         return await c.answer("Подожди пару секунд.")
+    cnt = 1
+    if n == 1:
+        try: cnt = len(next((d for nn, _, d in await panel.keys_devices(uid) if nn == 1), []))
+        except Exception: cnt = 1
     try:
         if n == 1: await panel.revoke_main(uid)
         else: await panel.ban_key(uid, n)
@@ -277,6 +292,15 @@ async def cb_dev_kry(c: CallbackQuery):
         return await c.answer("Не получилось отключить. Попробуй ещё раз или напиши в поддержку." + _why(uid, e), show_alert=True)
     db.kv_set(f"devrm:{uid}", str(int(time.time())))
     await c.answer("Готово")
+    if n == 1 and cnt > 1:
+        made = 1
+        for _ in range(cnt - 1):
+            try:
+                await panel.create_key(uid); made += 1
+            except Exception as e2:
+                logging.warning("split keys uid=%s: %s", uid, e2); break
+        scr = await connect_screen(uid, 1)
+        return await B.show(c, ("28_device_added.png", f"<b>Готово: у каждого устройства свой ключ ({made})</b>\n\nСтарый ключ отключён. Выбери устройство кнопками ниже и на нём нажми «Добавить в Happ» или «Добавить в Incy».\n\n" + scr[1], scr[2]))
     scr = await dev_screen(uid, f"Устройство {n} отключено: его ключ больше не работает. Остальные устройства работают как раньше."
                                 + (" Для устройства 1 выпущена новая ссылка: нажми «Подключиться» и добавь её заново." if n == 1 else ""))
     await B.show(c, ("30_device_off.png",) + tuple(scr[1:]))
@@ -1138,6 +1162,48 @@ async def cmd_keyban(m: Message, command: CommandObject):
     B.alog(m, "keyban", u["id"], rest[0])
     await m.answer(f"Устройство {rest[0]} удалено. Остальные устройства человека работают как раньше.")
 
+@router.message(Command("app"), is_owner)
+async def cmd_app(m: Message):
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    if not (config.OPEN_BASE and config.WEB_PORT):
+        return await m.answer("Мини-приложение выключено. Нужны WEB_PORT и OPEN_BASE (публичный https-адрес бота) в .env, "
+                              "те же, что для кнопок «Добавить в Happ / Incy».")
+    await m.answer("<b>Админка NQYRO</b>\n\nДеньги, клиенты, ноды и действия в одном окне.",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть админку", web_app=WebAppInfo(url=f"{config.OPEN_BASE}/app"))]]))
+
+@router.message(Command("newlink"), is_owner)
+async def cmd_newlink(m: Message, command: CommandObject):
+    from urllib.parse import quote
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    u, rest = await pick_user(m, command, "Формат: /newlink ID [send]\nПеревыпускает ключ основного устройства человека и даёт ссылки автодобавления в Incy и Happ. "
+                                          "С «send» бот ещё и сам пришлёт их человеку.")
+    if not u: return
+    tid = u["id"]
+    try:
+        if config.PER_DEVICE_KEYS: await panel.revoke_main(tid)
+        else: await panel.revoke_sub(tid)
+        info = await panel.keys_info(tid)
+    except Exception as e:
+        return await m.answer(f"Не вышло перевыпустить ключ: {esc(e)}")
+    sub = info[0][1]
+    if not sub: return await m.answer("Ключ перевыпущен, но панель не отдала ссылку. Посмотри /sub " + str(tid))
+    B.alog(m, "newlink", tid)
+    rows = []
+    if config.OPEN_URL:
+        rows = [[InlineKeyboardButton(text="Добавить в Incy", url=config.OPEN_URL.format(app="incy", sub=quote(sub, safe=""))),
+                 InlineKeyboardButton(text="Добавить в Happ", url=config.OPEN_URL.format(app="happ", sub=quote(sub, safe="")))]]
+    markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+    await m.answer(f"Ключ человека {tid} обновлён, старая ссылка не работает.\n\nНовая ссылка:\n<code>{esc(sub)}</code>\n\n"
+                   f"Автодобавление: <code>incy://import/{esc(sub)}</code>\n<code>happ://add/{esc(sub)}</code>"
+                   + ("\n\nКнопки ниже ведут на страницу автоимпорта, их можно переслать человеку." if rows else ""), reply_markup=markup)
+    if rest and rest[0].lower() == "send":
+        try:
+            await B.bot.send_message(tid, "<b>Ключ обновлён</b>\n\nНажми кнопку ниже, и подписка добавится в приложение сама. "
+                                          "Если не открылось, зайди в «Подключиться» в боте.", reply_markup=markup)
+            await m.answer("Отправил ему сообщение с кнопками.")
+        except Exception as e:
+            await m.answer(f"Не удалось написать человеку: {esc(e)}")
+
 @router.message(Command("devices"), is_support)
 async def cmd_devices(m: Message, command: CommandObject):
     u, _ = await pick_user(m, command, "Формат: /devices ID\nСписок устройств человека.")
@@ -1628,7 +1694,7 @@ async def cmd_promo_switch(m: Message, command: CommandObject):
     await m.answer(f"Код {esc(code.upper())} " + ("выключен: ввести его нельзя, статистика сохранена. Включить: /promoon КОД" if off else "снова работает."))
 
 # ----- меню команд -----
-OWNER_MENU = [("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
+OWNER_MENU = [("app", "Админка (мини-приложение)"), ("newlink", "Новый ключ и автодобавление"), ("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
               ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("sharing", "Кто делится подпиской"), ("promooff", "Выключить промокод"), ("promoon", "Включить промокод"), ("panelraw", "Что отвечает панель про человека"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
               ("top", "Топы"), ("new", "Новые люди и откуда"), ("partnerpromo", "Именной промокод партнёра"),
               ("promostat", "Статистика промокодов партнёров"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
