@@ -24,6 +24,7 @@ def start(u):
         kb(*([] if used else [[("Попробовать 5 дней", "trial")]]),
            [("Подключиться", "go:connect")],
            *([[("Открыть приложение", "app:/me")]] if config.OPEN_BASE and config.WEB_PORT else []),
+           *([[("Админка", "app:/app")]] if config.OPEN_BASE and config.WEB_PORT and u["id"] in config.ADMIN_IDS else []),   # только владельцам
            [("Тарифы", "go:plans"), ("Профиль", "go:profile")],
            [("Друзья", "go:friends"), ("Промокод", "promo")],
            [("Поддержка", "go:support")]))
