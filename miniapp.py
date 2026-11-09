@@ -8,7 +8,7 @@ Telegram (initData), подпись проверяется на сервере �
 import asyncio, hashlib, hmac, json, logging, os, re, time
 from urllib.parse import parse_qsl
 from aiohttp import web
-import config, db, panel, payments
+import config, db, demo, panel, payments
 
 HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.html")
 MAX_AGE = 24 * 3600   # initData старше суток не принимаем
@@ -238,6 +238,8 @@ async def page(request: web.Request):
             body = f.read()
     except OSError:
         return web.Response(status=404, text="app.html not found")
+    if request.query.get("demo"):   # демо с выдуманными данными, ничего реального не показывает
+        body = demo.inject(body, "admin")
     return web.Response(text=body, content_type="text/html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
@@ -446,6 +448,8 @@ async def client_page(request: web.Request):
             body = f.read()
     except OSError:
         return web.Response(status=404, text="client.html not found")
+    if request.query.get("demo"):
+        body = demo.inject(body, "client")
     return web.Response(text=body, content_type="text/html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
