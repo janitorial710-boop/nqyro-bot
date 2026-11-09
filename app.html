@@ -108,7 +108,7 @@ async function card(id){open_();$('#sheetc').innerHTML='<div class="empty">За�
      const n=k.devices.length;
      return `<div class="row"><div class="l"><div class="t">${d.per_device?'Ключ '+k.n:'Устройства'}${k.status&&k.status!=='ACTIVE'?` <span class="pill off">${esc(k.status)}</span>`:''}</div>
      <div class="s">${n?k.devices.map(x=>esc(x.name)).join('<br>'):'ещё не подключено'}</div></div>
-     ${d.per_device?`<div class="r"><span class="btn d" onclick="keyOff(${id},${k.n})">Отключить</span></div>`:''}</div>`}).join('')+'</div>':'<div class="empty">Нет устройств</div>');
+     ${d.per_device?`<div class="r"><span class="btn" onclick="reissue(${id},${k.n})">Новая ссылка</span><span class="btn d" onclick="keyOff(${id},${k.n})">Отключить</span></div>`:''}</div>`}).join('')+'</div>':'<div class="empty">Нет устройств</div>');
   $('#sheetc').innerHTML=`<span class="x" onclick="close_()">×</span><h1 style="margin-top:2px">${esc(name(u))}</h1>
   <div class="mut" style="margin:-6px 2px 12px">ID <b>${u.id}</b>${u.username?' · @'+esc(u.username):''}${d.src?' · источник '+esc(d.src):''}${d.ref?' · пригласил '+d.ref:''}</div>
   <div class="card"><div class="row"><div class="l"><div class="t">Подписка</div></div><div class="r">${until(u)}</div></div>
@@ -118,11 +118,21 @@ async function card(id){open_();$('#sheetc').innerHTML='<div class="empty">За�
   <h2>Выдать дни</h2><div>${[1,7,30,90].map(x=>`<span class="btn p" onclick="give(${id},${x})">+${x}</span>`).join('')}<span class="btn" onclick="giveCustom(${id})">Своё…</span></div>
   <h2>Устройства</h2>${dev}
   <h2>Платежи</h2>${d.payments.length?'<div class="card">'+d.payments.map(p=>`<div class="row"><div class="l"><div class="t">${esc(p.plan)}</div><div class="s">${fdt(p.ts)} · ${esc(p.method)}</div></div><div class="r"><b>${rub(p.amount)}</b></div></div>`).join('')+'</div>':'<div class="empty">Платежей нет</div>'}
-  <h2>Действия</h2><div><span class="btn ${u.banned?'':'d'}" onclick="ban(${id},${!u.banned})">${u.banned?'Разблокировать':'Заблокировать'}</span></div>`}catch(e){$('#sheetc').innerHTML='<span class="x" onclick="close_()">×</span><div class="card red">'+esc(e.message)+'</div>'}}
+  <h2>Действия</h2><div><span class="btn p" onclick="reissue(${id},1)">Новая ссылка</span><span class="btn ${u.banned?'':'d'}" onclick="ban(${id},${!u.banned})">${u.banned?'Разблокировать':'Заблокировать'}</span></div>`}catch(e){$('#sheetc').innerHTML='<span class="x" onclick="close_()">×</span><div class="card red">'+esc(e.message)+'</div>'}}
 function confirm_(t,f){tg&&tg.showConfirm?tg.showConfirm(t,ok=>ok&&f()):confirm(t)&&f()}
 function give(id,d){confirm_(`Выдать ${d} дн. человеку ${id}?`,async()=>{try{const r=await api(`user/${id}/give`,{body:{days:d}});toast(r.panel_error?'Выдано, но панель не ответила':'Выдано +'+d+' дн.',!!r.panel_error);card(id)}catch(e){toast(e.message,1)}})}
 function giveCustom(id){const v=prompt('Сколько дней выдать? (1–3650)');const d=parseInt(v);if(d>=1&&d<=3650)give(id,d)}
 function ban(id,flag){confirm_(flag?`Заблокировать ${id}?`:`Разблокировать ${id}?`,async()=>{try{const r=await api(`user/${id}/ban`,{body:{flag}});toast(r.panel_error?'Готово, но панель не ответила':(flag?'Заблокирован':'Разблокирован'),!!r.panel_error);card(id)}catch(e){toast(e.message,1)}})}
+function copyT(t){try{navigator.clipboard.writeText(t).then(()=>toast('Скопировано'))}catch(e){toast('Не удалось скопировать',1)}}
+function reissue(id,n){confirm_(`Перевыпустить ссылку устройства ${n}? Старая ссылка и ключ перестанут работать, устройство отвалится.`,async()=>{try{const r=await api(`user/${id}/key/${n}/reissue`,{body:{}});linkSheet(id,r)}catch(e){toast(e.message,1)}})}
+function linkSheet(id,r){window._lk=r;
+  $('#sheetc').innerHTML=`<span class="x" onclick="card(${id})">‹</span><h1 style="margin-top:2px">Новая ссылка</h1><div class="mut" style="margin:-6px 2px 12px">Человек ${id}, устройство ${r.n}. Старая ссылка уже не работает.</div>
+  <div class="card"><div class="k">Подписка</div><div style="word-break:break-all;margin:8px 0;font-size:13px">${esc(r.sub||'ссылка не получена, посмотри /sub в боте')}</div>
+  <span class="btn p" onclick="copyT(_lk.sub)">Скопировать ссылку</span></div>
+  <h2>Автоподключение</h2><div class="card"><span class="btn" onclick="copyT(_lk.deep_incy)">Скопировать для Incy</span><span class="btn" onclick="copyT(_lk.deep_happ)">Скопировать для Happ</span>
+  ${r.incy?`<span class="btn" onclick="copyT(_lk.incy)">Страница автоимпорта Incy</span><span class="btn" onclick="copyT(_lk.happ)">Страница автоимпорта Happ</span>`:''}</div>
+  <h2>Отправить</h2><div><span class="btn p" onclick="sendKey(${id},${r.n})">Отправить ему в бот</span><span class="btn" onclick="card(${id})">Назад к клиенту</span></div>`}
+async function sendKey(id,n){try{await api(`user/${id}/key/${n}/send`,{body:{}});toast('Отправил человеку в бот')}catch(e){toast(e.message,1)}}
 function keyOff(id,n){confirm_(`Отключить ключ ${n}? Устройство отвалится, остальные не затронутся.`,async()=>{try{await api(`user/${id}/key/${n}/off`,{body:{}});toast('Отключено');card(id)}catch(e){toast(e.message,1)}})}
 
 async function nodes(){load('Ноды');try{

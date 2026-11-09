@@ -1,12 +1,14 @@
 import html
 from datetime import datetime
 from urllib.parse import quote
-from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup, CopyTextButton
+from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup, CopyTextButton, WebAppInfo
 import config, db
 
 def b(text, data):
     if data.startswith("url:"):
         return Btn(text=text, url=data[4:])
+    if data.startswith("app:"):   # мини-приложение, адрес = OPEN_BASE + путь
+        return Btn(text=text, web_app=WebAppInfo(url=config.OPEN_BASE + data[4:]))
     return Btn(text=text, callback_data=data)
 
 def kb(*rows):
@@ -21,6 +23,7 @@ def start(u):
         + ("" if used else "\n\nНовым пользователям 5 дней бесплатно."),
         kb(*([] if used else [[("Попробовать 5 дней", "trial")]]),
            [("Подключиться", "go:connect")],
+           *([[("Открыть приложение", "app:/me")]] if config.OPEN_BASE and config.WEB_PORT else []),
            [("Тарифы", "go:plans"), ("Профиль", "go:profile")],
            [("Друзья", "go:friends"), ("Промокод", "promo")],
            [("Поддержка", "go:support")]))
@@ -68,6 +71,8 @@ def connect_keys(u, keys, sel, can_add):
         rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
     if can_add:
         rows.append([b("Добавить устройство", "conn:new")])
+    if config.OPEN_BASE and config.WEB_PORT:
+        rows.append([b("Открыть приложение", "app:/me")])
     rows += [[b("Устройства", "dev:open"), b("Не работает?", "faq:open")], [b("Назад", "go:start")]]
     return ("03_connect.png", text, Markup(inline_keyboard=rows))
 

@@ -106,6 +106,8 @@ async def cmd_start(m: Message, command: CommandObject):
             await panel.set_expiry(uid, until)
             return await show(m, screens.promo_ok(db.get_user(uid), days, until))
         return await show(m, screens.promo_bad(db.get_user(uid), status))
+    if command.args in ("plans", "connect", "profile", "friends", "support"):   # ссылки из мини-приложения
+        return await show(m, await screen_for(command.args, m.from_user.id))
     await show(m, await screen_for("start", m.from_user.id))
 
 @dp.message(Command("connect", "plans", "profile", "friends", "support", "topup", "partner"))

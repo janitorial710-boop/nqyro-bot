@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#05070a">
+<title>NQYRO</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#05070a;--card:rgba(16,24,20,.78);--card2:#16201b;--line:rgba(198,255,26,.14);--line2:#223028;--tx:#f2f6ef;--mut:#8d9a90;--lime:#c6ff1a;--lime2:#8fd400;--red:#ff5d5d;--ok:#6dff9c;--safe-b:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--tx);font-family:-apple-system,system-ui,"SF Pro Display",Segoe UI,Roboto,sans-serif;font-size:15px;-webkit-font-smoothing:antialiased}
+body{padding:0 16px calc(96px + var(--safe-b));min-height:100vh;overflow-x:hidden}
+#bg{position:fixed;inset:0;z-index:-1;pointer-events:none}
+.glow{position:fixed;z-index:-2;border-radius:50%;filter:blur(90px);pointer-events:none}
+.glow.a{width:380px;height:380px;right:-140px;top:-120px;background:rgba(198,255,26,.20)}
+.glow.b{width:320px;height:320px;left:-160px;top:46vh;background:rgba(80,200,60,.10)}
+.top{display:flex;align-items:center;justify-content:space-between;padding:calc(14px + env(safe-area-inset-top,0px)) 2px 4px}
+.top img{height:34px;filter:drop-shadow(0 0 12px rgba(198,255,26,.35))}
+.chip{font-size:12px;font-weight:700;padding:6px 11px;border-radius:99px;background:rgba(198,255,26,.08);border:1px solid var(--line);color:var(--lime)}
+h1{font-size:26px;margin:16px 2px 6px;letter-spacing:-.4px}
+h2{font-size:12px;margin:26px 2px 10px;color:var(--mut);text-transform:uppercase;letter-spacing:1.6px;font-weight:700}
+.view>*{animation:up .5s cubic-bezier(.2,.8,.2,1) both}.view>*:nth-child(2){animation-delay:.05s}.view>*:nth-child(3){animation-delay:.1s}.view>*:nth-child(4){animation-delay:.15s}.view>*:nth-child(5){animation-delay:.2s}.view>*:nth-child(n+6){animation-delay:.25s}
+@keyframes up{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.card{position:relative;background:var(--card);border:1px solid var(--line2);border-radius:22px;padding:16px;margin-bottom:12px;backdrop-filter:blur(14px)}
+.card.hot{border-color:rgba(198,255,26,.5);box-shadow:0 0 40px rgba(198,255,26,.12),inset 0 0 40px rgba(198,255,26,.04)}
+.mut{color:var(--mut)}.lime{color:var(--lime)}.red{color:var(--red)}.ok{color:var(--ok)}.sm{font-size:13px}
+.btn{display:block;width:100%;text-align:center;border:1px solid var(--line2);background:var(--card2);color:var(--tx);border-radius:16px;padding:15px;font-size:16px;font-weight:700;margin:10px 0 0;transition:transform .12s,opacity .12s;cursor:pointer;user-select:none}
+.btn:active{transform:scale(.97);opacity:.75}
+.btn.p{background:linear-gradient(180deg,#d2ff3d,#b6f000);color:#0a1300;border-color:#d8ff55;box-shadow:0 0 30px rgba(198,255,26,.30),inset 0 1px 0 rgba(255,255,255,.5)}
+.btn.d{color:var(--red);border-color:rgba(255,93,93,.28);background:transparent}.btn.s{padding:12px;font-size:14px;border-radius:14px}
+.btn.off{opacity:.4;pointer-events:none}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.two .btn{margin-top:10px}
+.hero{position:relative;overflow:hidden;border-radius:26px;border:1px solid rgba(198,255,26,.35);margin-top:10px;min-height:268px;background:#070b09;box-shadow:0 0 50px rgba(198,255,26,.12)}
+.hero .m{position:absolute;right:-70px;bottom:-20px;height:118%;width:auto;opacity:.95;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 38%);mask-image:linear-gradient(90deg,transparent 0,#000 38%)}
+.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#070b09 18%,rgba(7,11,9,.55) 52%,transparent 80%),linear-gradient(0deg,rgba(7,11,9,.9),transparent 45%);pointer-events:none}
+.hero .in{position:relative;z-index:2;padding:20px 18px;display:flex;flex-direction:column;justify-content:flex-end;min-height:268px}
+.big{font-size:64px;font-weight:900;line-height:.95;letter-spacing:-2px;font-style:italic}
+.big.on{color:var(--lime);text-shadow:0 0 30px rgba(198,255,26,.5)}
+.unit{font-size:15px;font-weight:700;margin-top:4px;color:var(--tx)}
+.bar{height:6px;border-radius:9px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:14px;max-width:210px}
+.bar i{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,var(--lime2),var(--lime));box-shadow:0 0 14px var(--lime);transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.badge{position:absolute;top:-1px;right:16px;background:var(--lime);color:#0a1300;font-size:10.5px;font-weight:900;letter-spacing:.6px;padding:5px 10px 6px;border-radius:0 0 11px 11px}
+.plan{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;transition:transform .15s,border-color .15s;overflow:hidden}
+.plan:active{transform:scale(.98)}.plan.best{border-color:rgba(198,255,26,.55);box-shadow:0 0 34px rgba(198,255,26,.12)}
+.plan .nm{font-size:18px;font-weight:800}.plan .pr{font-size:24px;font-weight:900;text-align:right}.plan s{color:var(--mut);font-size:13px;font-weight:600;margin-right:6px}
+.tag{display:inline-block;font-size:11px;font-weight:800;padding:3px 8px;border-radius:7px;background:rgba(198,255,26,.14);color:var(--lime);margin-top:5px}
+.dv{display:flex;gap:14px;align-items:center}
+.ico{flex:none;width:46px;height:46px;border-radius:15px;display:flex;align-items:center;justify-content:center;background:rgba(198,255,26,.08);border:1px solid var(--line);font-size:23px}
+.pill{display:inline-block;font-size:11px;font-weight:800;padding:4px 10px;border-radius:99px;background:#1b2520;color:var(--mut)}
+.pill.on{background:rgba(109,255,156,.14);color:var(--ok)}
+.step{display:flex;gap:12px;align-items:flex-start;margin:11px 0}.step b{flex:none;width:26px;height:26px;border-radius:50%;background:var(--lime);color:#0a1300;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 0 14px rgba(198,255,26,.5)}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--line2)}.row:last-child{border-bottom:0}
+code{background:var(--card2);padding:3px 7px;border-radius:7px;font-size:12px;word-break:break-all;color:var(--lime)}
+nav{position:fixed;left:12px;right:12px;bottom:calc(10px + var(--safe-b));display:flex;gap:4px;padding:6px;background:rgba(10,15,12,.85);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:22px;box-shadow:0 10px 40px rgba(0,0,0,.6);z-index:10}
+nav div{flex:1;text-align:center;padding:9px 0 8px;border-radius:17px;color:var(--mut);font-size:11.5px;font-weight:700;transition:all .2s;cursor:pointer}
+nav div b{display:block;font-size:20px;font-weight:400;margin-bottom:2px;transition:transform .2s}
+nav div.on{color:var(--lime);background:rgba(198,255,26,.10);box-shadow:inset 0 0 0 1px var(--line)}nav div.on b{transform:translateY(-1px) scale(1.12)}
+.sheet{position:fixed;inset:0;z-index:20;display:none}.sheet.on{display:block}
+.sheet .bd{position:absolute;inset:0;background:rgba(0,0,0,.66);backdrop-filter:blur(4px);animation:fade .25s both}
+.sheet .pn{position:absolute;left:0;right:0;bottom:0;max-height:92vh;overflow:auto;background:linear-gradient(180deg,#0e1511,#080c0a);border-top:1px solid rgba(198,255,26,.4);border-radius:28px 28px 0 0;padding:10px 16px calc(24px + var(--safe-b));animation:sl .38s cubic-bezier(.2,.9,.25,1) both;box-shadow:0 -20px 60px rgba(198,255,26,.10)}
+.grab{width:44px;height:5px;border-radius:9px;background:#2a372f;margin:4px auto 14px}
+@keyframes sl{from{transform:translateY(100%)}to{transform:none}}@keyframes fade{from{opacity:0}to{opacity:1}}
+.meth{display:flex;align-items:center;gap:14px;padding:14px;border-radius:18px;border:1.5px solid var(--line2);background:var(--card2);margin-top:10px;cursor:pointer;transition:all .15s}
+.meth.on{border-color:var(--lime);background:rgba(198,255,26,.07);box-shadow:0 0 24px rgba(198,255,26,.14)}.meth.off{opacity:.4;pointer-events:none}
+.meth .ic{font-size:24px;width:30px;text-align:center}.meth .tt{flex:1}.meth .tt b{display:block;font-size:16px}.meth .tt span{font-size:12px;color:var(--mut)}
+.rad{width:22px;height:22px;border-radius:50%;border:2px solid #34443a;display:flex;align-items:center;justify-content:center}.meth.on .rad{border-color:var(--lime)}.meth.on .rad:after{content:"";width:11px;height:11px;border-radius:50%;background:var(--lime);box-shadow:0 0 10px var(--lime)}
+input.in{width:100%;margin-top:10px;background:var(--card2);border:1.5px solid var(--line2);border-radius:16px;padding:15px;color:var(--tx);font-size:16px;outline:none}input.in:focus{border-color:var(--lime)}
+.sum{display:flex;justify-content:space-between;align-items:flex-end;margin:6px 2px 4px}.sum .t{font-size:22px;font-weight:900}
+.wait{text-align:center;padding:24px 8px}
+.spin{width:54px;height:54px;border:4px solid #1d2a23;border-top-color:var(--lime);border-radius:50%;margin:10px auto 18px;animation:r .8s linear infinite;filter:drop-shadow(0 0 10px rgba(198,255,26,.5))}@keyframes r{to{transform:rotate(360deg)}}
+.okc{width:84px;height:84px;border-radius:50%;background:var(--lime);margin:6px auto 16px;display:flex;align-items:center;justify-content:center;font-size:44px;color:#0a1300;box-shadow:0 0 50px rgba(198,255,26,.6);animation:pop .5s cubic-bezier(.2,1.6,.4,1) both}@keyframes pop{from{transform:scale(.3);opacity:0}to{transform:none;opacity:1}}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(104px + var(--safe-b));background:var(--lime);color:#0a1300;padding:12px 18px;border-radius:14px;font-weight:800;z-index:40;display:none;max-width:90%;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.5)}.toast.e{background:var(--red);color:#fff}
+.sk{height:96px;border-radius:22px;margin-bottom:12px;background:linear-gradient(100deg,rgba(255,255,255,.04) 30%,rgba(198,255,26,.08) 50%,rgba(255,255,255,.04) 70%);background-size:200% 100%;animation:sh 1.2s linear infinite}@keyframes sh{to{background-position:-200% 0}}
+#fx{position:fixed;inset:0;z-index:50;pointer-events:none}
+.hlp{margin-top:8px;border:1px solid var(--line);border-radius:14px;background:var(--card2)}.hlp summary{list-style:none;cursor:pointer;padding:12px 14px;font-size:14px;font-weight:700;color:var(--mut)}
+.hlp summary::-webkit-details-marker{display:none}.hlp[open] summary{color:var(--tx)}.hb{padding:0 14px 12px}.hs{display:flex;gap:10px;margin:9px 0;font-size:13px;line-height:1.5;color:var(--mut)}
+.hs i{flex:none;width:22px;height:22px;border-radius:50%;background:var(--lime);color:#0a1200;font-style:normal;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center}.hs a{color:var(--lime)}
+</style></head><body>
+<canvas id="bg"></canvas><div class="glow a"></div><div class="glow b"></div><canvas id="fx"></canvas>
+<div class="top"><img src="/static/logo.png" alt="NQYRO"><div class="chip" id="chip">VPN</div></div>
+<div id="view" class="view"></div>
+<div class="sheet" id="sheet"><div class="bd" onclick="closeSheet()"></div><div class="pn"><div class="grab"></div><div id="sc"></div></div></div>
+<div class="toast" id="toast"></div>
+<nav><div data-t="home" class="on"><b>◔</b>Главная</div><div data-t="dev"><b>▣</b>Устройства</div><div data-t="more"><b>☰</b>Ещё</div></nav>
+<script>
+const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();try{tg.setHeaderColor('#05070a');tg.setBackgroundColor('#05070a');tg.disableVerticalSwipes&&tg.disableVerticalSwipes()}catch(e){}}
+const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const rub=n=>Math.round(n||0).toLocaleString('ru-RU')+' ₽';
+const fd=ts=>ts?new Date(ts*1000).toLocaleDateString('ru-RU',{day:'numeric',month:'long',year:'numeric'}):'';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function toast(t,err){const e=$('#toast');e.textContent=t;e.className='toast'+(err?' e':'');e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',3000)}
+function vib(t){try{tg.HapticFeedback.notificationOccurred(t||'success')}catch(e){}}function tap(){try{tg.HapticFeedback.impactOccurred('light')}catch(e){}}
+async function api(path,body){
+  const r=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',headers:{'X-Init-Data':tg?tg.initData:'','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  if(!r.ok){let m=await r.text();try{m=JSON.parse(m).error||m}catch(e){}throw new Error(m||('Ошибка '+r.status))}
+  return r.json()}
+function ask(t,f){tg&&tg.showConfirm?tg.showConfirm(t,ok=>ok&&f()):confirm(t)&&f()}
+function openBot(start){const u='https://t.me/'+ME.bot+(start?'?start='+start:'');tg&&tg.openTelegramLink?tg.openTelegramLink(u):location.href=u;setTimeout(()=>tg&&tg.close&&tg.close(),300)}
+function addTo(i,app){const k=D&&D.keys&&D.keys[i];if(!k)return;const u=k[app];if(!u)return toast('Ссылка недоступна, скопируй её вручную',1);
+  try{navigator.clipboard&&navigator.clipboard.writeText(k.sub)}catch(e){}   /* на случай ручного добавления ссылка уже в буфере */
+  tap();try{tg&&tg.openLink?tg.openLink(u,{try_instant_view:false,try_browser:true}):window.open(u,'_blank')}catch(e){window.open(u,'_blank')}
+  setTimeout(function(){if(!document.hidden)toast('Не открылось? Нажми «Не открылось?» под карточкой',0)},4000)}
+function openUrl(u){if(!u)return toast('Ссылка недоступна, скопируй вручную',1);tap();tg&&tg.openLink?tg.openLink(u):window.open(u,'_blank')}
+async function copy(t){tap();try{await navigator.clipboard.writeText(t);vib();toast('Ссылка скопирована')}catch(e){const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');toast('Ссылка скопирована')}catch(x){toast('Не удалось скопировать',1)}a.remove()}}
+function plural(n,a,b,c){n=Math.abs(n)%100;const k=n%10;return n>10&&n<20?c:k>1&&k<5?b:k==1?a:c}
+function count(el,to,ms){ms=ms||900;if(!el)return;const t0=performance.now();(function f(t){const k=Math.min(1,(t-t0)/ms),e=1-Math.pow(1-k,3);el.textContent=Math.round(to*e);if(k<1)requestAnimationFrame(f)})(t0)}
+
+(function(){const c=$('#bg'),x=c.getContext('2d');let W,H,P=[];function rs(){W=c.width=innerWidth;H=c.height=innerHeight}rs();addEventListener('resize',rs);
+for(let i=0;i<42;i++)P.push({x:Math.random()*W,y:Math.random()*H,r:Math.random()*1.8+.4,v:Math.random()*.25+.05,a:Math.random()*.6+.15});
+(function f(){x.clearRect(0,0,W,H);for(const p of P){p.y-=p.v;if(p.y<-5){p.y=H+5;p.x=Math.random()*W}x.fillStyle='rgba(198,255,26,'+p.a+')';x.shadowColor='#c6ff1a';x.shadowBlur=8;x.beginPath();x.arc(p.x,p.y,p.r,0,6.3);x.fill()}requestAnimationFrame(f)})()})();
+function confetti(){const c=$('#fx'),x=c.getContext('2d');c.width=innerWidth;c.height=innerHeight;const cols=['#c6ff1a','#ffffff','#8fd400','#e9ff9a'];
+const P=Array.from({length:150},()=>({x:innerWidth/2,y:innerHeight*.55,vx:(Math.random()-.5)*16,vy:-Math.random()*16-4,w:Math.random()*8+4,h:Math.random()*5+3,r:Math.random()*6,vr:(Math.random()-.5)*.4,c:cols[Math.random()*4|0]}));let n=0;
+(function f(){x.clearRect(0,0,c.width,c.height);for(const p of P){p.vy+=.45;p.x+=p.vx;p.y+=p.vy;p.vx*=.99;p.r+=p.vr;x.save();x.translate(p.x,p.y);x.rotate(p.r);x.fillStyle=p.c;x.fillRect(-p.w/2,-p.h/2,p.w,p.h);x.restore()}
+if(++n<150)requestAnimationFrame(f);else x.clearRect(0,0,c.width,c.height)})()}
+
+let ME=null,tab='home',D=null;
+document.querySelectorAll('nav div').forEach(b=>b.onclick=()=>{tap();show(b.dataset.t)});
+function show(t){tab=t;document.querySelectorAll('nav div').forEach(x=>x.classList.toggle('on',x.dataset.t===t));window.scrollTo(0,0);({home:home,dev:dev,more:more})[t]()}
+function fail(e){$('#view').innerHTML='<h1>Не получилось</h1><div class="card"><span class="red">'+esc(e.message)+'</span></div><div class="btn p" onclick="boot()">Повторить</div>'}
+function skel(){return '<div class="sk"></div><div class="sk"></div><div class="sk" style="height:60px"></div>'}
+async function boot(){$('#view').innerHTML=skel();try{ME=await api('me');$('#chip').textContent=ME.active?'● активна':'VPN';show(tab)}catch(e){fail(e)}}
+
+function home(){const m=ME;
+  if(m.banned){$('#view').innerHTML='<h1>Доступ закрыт</h1><div class="card">Подписка заблокирована. Напиши в поддержку, разберёмся.</div><div class="btn p" onclick="openUrl(\'https://t.me/'+esc(m.support)+'\')">Поддержка</div>';return}
+  const pct=m.active?Math.min(100,m.days/30*100):0;
+  const un=m.active?plural(m.days,'день','дня','дней'):'дней';
+  $('#view').innerHTML='<div class="hero"><img class="m" src="/static/mascot.jpg" alt="">'+
+  '<div class="in"><div class="mut sm" style="font-weight:700;letter-spacing:1px">'+(m.active?'ПОДПИСКА АКТИВНА':(m.until?'ПОДПИСКА ЗАКОНЧИЛАСЬ':'ЕЩЁ НЕ ПОДКЛЮЧЕНО'))+'</div>'+
+  '<div class="big '+(m.active?'on':'')+'" id="days">0</div><div class="unit">'+un+' осталось</div>'+
+  '<div class="bar"><i style="width:0" id="barf"></i></div>'+
+  '<div class="mut sm" style="margin-top:10px">'+(m.active?'до '+fd(m.until):(m.until?'была до '+fd(m.until):'Привет'+(m.name?', '+esc(m.name):'')+'!'))+'</div></div></div>'+
+  (m.active?'<div class="btn p" onclick="show(\'dev\')">Подключиться</div>':'')+
+  (!m.active&&m.trial_available?'<div class="btn p" onclick="trial()">Попробовать '+m.trial_days+' '+plural(m.trial_days,'день','дня','дней')+' бесплатно</div>':'')+
+  '<h2>'+(m.active?'Продлить':'Выбрать тариф')+'</h2>'+plansHtml()+
+  (m.balance>0?'<div class="card"><div class="row" style="border:0;padding:0"><span class="mut">Баланс</span><b class="lime">'+rub(m.balance)+'</b></div></div>':'');
+  if(m.active){count($('#days'),m.days);setTimeout(function(){const b=$('#barf');if(b)b.style.width=pct+'%'},120)}}
+function plansHtml(){return ME.plans.map(function(p){const best=ME.best===p.key;
+  return '<div class="card plan '+(best?'best':'')+'" onclick="openPay(\''+p.key+'\')">'+(best?'<div class="badge">ВЫГОДНО</div>':'')+
+  '<div><div class="nm">'+esc(p.name)+'</div><div class="mut sm">'+p.days+' дней · '+rub(p.per_month)+'/мес</div>'+
+  (p.save?'<span class="tag">−'+p.save+'% к месячному</span>':'')+(p.label?'<span class="tag" style="margin-left:6px">'+esc(p.label)+'</span>':'')+'</div>'+
+  '<div class="pr">'+(p.price<p.base?'<s>'+rub(p.base)+'</s>':'')+rub(p.price)+'</div></div>'}).join('')}
+async function trial(){tap();try{await api('me/trial',{});vib();confetti();toast('Пробный период включён');await boot()}catch(e){vib('error');toast(e.message,1)}}
+
+let PAY={plan:null,method:'sbp',pid:null,polling:false};
+function openSheet(h){$('#sc').innerHTML=h;$('#sheet').classList.add('on');if(tg&&tg.BackButton){tg.BackButton.show();tg.BackButton.onClick(closeSheet)}}
+function closeSheet(){$('#sheet').classList.remove('on');PAY.polling=false;if(tg&&tg.BackButton)tg.BackButton.hide()}
+function openPay(key){tap();const p=ME.plans.find(function(x){return x.key===key});if(!p)return;PAY={plan:key,method:ME.balance>=p.price?'balance':'sbp',pid:null,polling:false};payView()}
+function setM(m){PAY.method=m;tap();payView()}
+function payView(){const p=ME.plans.find(function(x){return x.key===PAY.plan}),can=ME.balance>=p.price;
+  openSheet('<div class="sum"><div><div class="mut sm">Тариф</div><div class="t">'+esc(p.name)+'</div></div><div style="text-align:right">'+(p.price<p.base?'<s class="mut sm">'+rub(p.base)+'</s>':'')+'<div class="t lime">'+rub(p.price)+'</div></div></div>'+
+  (p.label?'<div class="tag">'+esc(p.label)+'</div>':'')+
+  '<h2 style="margin-top:18px">Способ оплаты</h2>'+
+  '<div class="meth '+(PAY.method==='sbp'?'on':'')+'" onclick="setM(\'sbp\')"><div class="ic">⚡</div><div class="tt"><b>СБП</b><span>Мгновенно через банк</span></div><div class="rad"></div></div>'+
+  '<div class="meth '+(PAY.method==='card'?'on':'')+'" onclick="setM(\'card\')"><div class="ic">💳</div><div class="tt"><b>Банковская карта</b><span>Visa, Mastercard, МИР</span></div><div class="rad"></div></div>'+
+  '<div class="meth '+(PAY.method==='balance'?'on':'')+' '+(can?'':'off')+'" onclick="setM(\'balance\')"><div class="ic">◈</div><div class="tt"><b>С баланса</b><span>'+(can?'Доступно '+rub(ME.balance):'Не хватает '+rub(p.price-ME.balance))+'</span></div><div class="rad"></div></div>'+
+  (ME.need_email&&PAY.method!=='balance'?'<h2>Email для чека</h2><input class="in" id="em" type="email" inputmode="email" placeholder="name@mail.ru" value="'+esc(ME.email)+'" autocomplete="email"><div class="mut sm" style="margin:6px 2px 0">Чек об оплате придёт на этот адрес.</div>':'')+
+  '<div class="btn p" id="gopay" onclick="doPay()">Оплатить '+rub(p.price)+'</div>'+
+  '<div class="mut sm" style="text-align:center;margin-top:12px">Stars и крипта доступны в боте</div><div class="btn s" onclick="openBot(\'plans\')">Открыть в боте</div>')}
+async function doPay(){const btn=$('#gopay');if(btn.classList.contains('off'))return;btn.classList.add('off');btn.textContent='Создаю счёт…';tap();
+  const price=ME.plans.find(function(x){return x.key===PAY.plan}).price;
+  try{
+    if(ME.need_email&&PAY.method!=='balance'){const em=($('#em')||{}).value||'';await api('me/email',{email:em});ME.need_email=false;ME.email=em}
+    const r=await api('me/pay',{plan:PAY.plan,method:PAY.method});
+    if(r.need_email){ME.need_email=true;return payView()}
+    if(r.status==='paid')return paid(r.until);
+    if(r.dev){btn.classList.remove('off');btn.textContent='Оплатить '+rub(price);return toast('Тестовый режим: счёт '+r.pid)}
+    PAY.pid=r.pid;waitView(r.pid);openUrl(r.url);poll(r.pid)
+  }catch(e){vib('error');toast(e.message,1);btn.classList.remove('off');btn.textContent='Оплатить '+rub(price)}}
+function waitView(pid){$('#sc').innerHTML='<div class="wait"><div class="spin"></div><h1 style="margin:0 0 8px">Ждём оплату</h1><div class="mut">Оплати на открывшейся странице банка.<br>Здесь всё обновится само, как только платёж пройдёт.</div>'+
+  '<div class="btn s" onclick="check('+pid+',true)">Я оплатил, проверить</div><div class="btn s" onclick="openPay(\''+PAY.plan+'\')">Назад к способам</div></div>'}
+async function check(pid,manual){try{const s=await api('me/payment/'+pid);if(s.status==='paid'){PAY.polling=false;return paid(s.until)}if(s.status==='canceled'){PAY.polling=false;vib('error');toast('Платёж отменён',1);return payView()}if(manual)toast('Пока не видим оплату, подожди минуту',1)}catch(e){if(manual)toast(e.message,1)}}
+async function poll(pid){PAY.polling=true;const end=Date.now()+20*60*1000;while(PAY.polling&&Date.now()<end){await sleep(3500);if(!PAY.polling)break;await check(pid,false)}}
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&PAY.pid&&PAY.polling)check(PAY.pid,false)});
+async function paid(until){PAY.polling=false;vib();confetti();
+  $('#sc').innerHTML='<div class="wait"><div class="okc">✓</div><h1 style="margin:0 0 8px">Оплата прошла</h1><div class="mut">Подписка активна до <b class="lime">'+fd(until)+'</b></div><div class="btn p" onclick="closeSheet();show(\'dev\')">Подключить устройство</div><div class="btn s" onclick="closeSheet()">Готово</div></div>';
+  try{ME=await api('me');$('#chip').textContent='● активна'}catch(e){}if(tab==='home')home()}
+
+function icon(n){n=(n||'').toLowerCase();return /iphone|ipad|ios/.test(n)?'':/android/.test(n)?'🤖':/windows/.test(n)?'🖥':/mac/.test(n)?'💻':'📱'}
+const APPLE='<svg width="22" height="22" viewBox="0 0 24 24" fill="#c6ff1a"><path d="M16.4 12.6c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.2.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.2.9-1.3 1.2-2.5 1.3-2.6-.1 0-2.5-1-2.5-3.7zM14.2 5.7c.6-.8 1.1-1.9.9-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.8-1.3z"/></svg>';
+async function dev(){
+  $('#view').innerHTML='<h1>Устройства</h1>'+skel();
+  try{D=await api('me/connect')}catch(e){return fail(e)}
+  if(!D.active){$('#view').innerHTML='<h1>Устройства</h1><div class="card"><div style="text-align:center;padding:14px 0"><div style="font-size:42px">🔒</div><div class="mut" style="margin-top:8px">Чтобы подключить устройство, нужна активная подписка</div></div></div><div class="btn p" onclick="show(\'home\')">Выбрать тариф</div>';return}
+  $('#view').innerHTML='<h1>Устройства</h1><div class="mut" style="margin:0 2px 14px">Занято <b class="lime">'+D.used+'</b> из '+D.allowed+'. У каждого устройства свой ключ.</div>'+
+  '<div class="card"><div class="step"><b>1</b><div>Установи <a style="color:var(--lime);font-weight:700" href="#" onclick="openUrl(D.happ_dl);return false">Happ</a> или <a style="color:var(--lime);font-weight:700" href="#" onclick="openUrl(D.incy_dl);return false">Incy</a></div></div>'+
+  '<div class="step"><b>2</b><div>Нажми «Добавить» на карточке своего устройства</div></div><div class="step"><b>3</b><div>Включи VPN. Всё подключится само.</div></div></div>'+
+  D.keys.map(function(k,i){return card(k,i)}).join('')+
+  (D.can_add?'<div class="btn" onclick="addDev()">＋ Добавить устройство</div>':(D.per_device?'<div class="mut sm" style="margin:12px 2px">Все места заняты. Отключи ненужное или докупи устройство в боте.</div><div class="btn s" onclick="openBot(\'plans\')">Докупить устройство</div>':''))}
+function card(k,i){const names=k.devices.length?k.devices.map(function(x){return esc(x.name)}).join('<br>'):'ещё не подключено';const ic=icon(k.devices[0]&&k.devices[0].name);
+  return '<div class="card"><div class="dv"><div class="ico">'+(ic||APPLE)+'</div>'+
+  '<div style="flex:1;min-width:0"><b style="font-size:17px">Устройство '+k.n+'</b><div class="mut sm" style="margin-top:3px">'+names+'</div></div><span class="pill '+(k.devices.length?'on':'')+'">'+(k.devices.length?'в сети':'новое')+'</span></div>'+
+  '<div class="two"><div class="btn p s" onclick="addTo('+i+',\'happ\')">Добавить в Happ</div><div class="btn p s" onclick="addTo('+i+',\'incy\')">Добавить в Incy</div></div>'+
+  '<div class="btn s" onclick="copy(D.keys['+i+'].sub)">Скопировать ссылку</div>'+
+  '<details class="hlp"><summary>Не открылось?</summary><div class="hb">'+
+  '<div class="hs"><i>1</i><div>Установи приложение: <a href="#" onclick="openUrl(D.happ_dl);return false">Happ</a> или <a href="#" onclick="openUrl(D.incy_dl);return false">Incy</a>. Если в App Store нет Happ, возьми Incy.</div></div>'+
+  '<div class="hs"><i>2</i><div>Нажми «Скопировать ссылку» выше.</div></div>'+
+  '<div class="hs"><i>3</i><div>В приложении нажми «+» и «Вставить из буфера обмена». Подписка добавится.</div></div>'+
+  '<div class="hs"><i>4</i><div>Всё равно не вышло? Попробуй другое приложение или напиши в поддержку.</div></div></div></details>'+
+  (D.per_device?'<div class="btn d s" onclick="off('+k.n+','+k.devices.length+')">Отключить'+(k.devices.length>1?' все '+k.devices.length+' устройства':'')+'</div>':'')+'</div>'}
+async function addDev(){tap();try{await api('me/device/add',{});vib();confetti();toast('Ключ для нового устройства готов');await dev();setTimeout(function(){window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})},100)}catch(e){vib('error');toast(e.message,1)}}
+function off(n,c){ask(c>1?'Разнести '+c+' устройства по отдельным ключам? Старый общий ключ перестанет работать, для каждого устройства появится своя ссылка.':'Отключить устройство '+n+'? Его ключ перестанет работать, остальные не затронутся.',async function(){
+  try{const r=await api('me/device/'+n+'/off',{});vib();toast(r.split?'Готово: у каждого устройства свой ключ':'Устройство отключено');await dev()}catch(e){vib('error');toast(e.message,1)}})}
+
+function more(){const m=ME,share='https://t.me/share/url?url='+encodeURIComponent(m.ref_link)+'&text='+encodeURIComponent('NQYRO VPN: включил и пользуешься');
+  $('#view').innerHTML='<h1>Ещё</h1>'+
+  '<h2>Друзья</h2><div class="card"><div class="mut sm">Приглашай друзей и получай бонусы. Твоя ссылка:</div><div style="margin:10px 0"><code>'+esc(m.ref_link)+'</code></div>'+
+  '<div class="two"><div class="btn p s" onclick="tg&&tg.openTelegramLink?tg.openTelegramLink(\''+share+'\'):openUrl(\''+share+'\')">Поделиться</div><div class="btn s" onclick="copy(\''+m.ref_link+'\')">Копировать</div></div>'+
+  '<div class="btn s" onclick="openBot(\'friends\')">Мои бонусы</div></div>'+
+  '<h2>Помощь</h2><div class="card"><div class="mut sm" style="margin-bottom:6px">Не подключается? Обнови подписку в приложении, проверь, что VPN включён и подписка активна. Не помогло, пиши нам, ответим быстро.</div>'+
+  '<div class="btn p s" onclick="openUrl(\'https://t.me/'+esc(m.support)+'\')">Написать в поддержку</div><div class="btn s" onclick="openBot(\'support\')">Помощь в боте</div></div>'+
+  '<h2>Аккаунт</h2><div class="card"><div class="row"><span class="mut">Мой ID</span><b>'+m.id+'</b></div>'+(m.balance>0?'<div class="row"><span class="mut">Баланс</span><b class="lime">'+rub(m.balance)+'</b></div>':'')+'<div class="btn s" onclick="openBot(\'profile\')">Профиль в боте</div></div>'}
+boot();
+</script></body></html>
