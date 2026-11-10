@@ -1761,6 +1761,7 @@ async def main():
     public_cmds = [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="connect", description="Подключиться"),
+        BotCommand(command="cabinet", description="Приложение NQYRO"),
         BotCommand(command="plans", description="Тарифы"),
         BotCommand(command="profile", description="Профиль"),
         BotCommand(command="friends", description="Пригласить друга"),

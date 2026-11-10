@@ -203,7 +203,7 @@ async def key_send(request, uid):
     if config.OPEN_URL:
         rows = [[InlineKeyboardButton(text="Добавить в Incy", url=_open_url("incy", sub)),
                  InlineKeyboardButton(text="Добавить в Happ", url=_open_url("happ", sub))]]
-    if config.OPEN_BASE and config.WEB_PORT:
+    if config.client_app_visible(tid):
         from aiogram.types import WebAppInfo
         rows.append([InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=config.OPEN_BASE + "/me"))])
     await extras.B.bot.send_message(tid, "<b>Ключ обновлён</b>\n\nНажми кнопку ниже, и подписка добавится в приложение сама. "
@@ -251,6 +251,8 @@ CLIENT_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client.h
 def capi(handler):
     async def wrap(request: web.Request):
         uid = _verify(request)
+        if not config.CLIENT_APP_PUBLIC and uid not in config.ADMIN_IDS:
+            raise web.HTTPForbidden(text="Приложение скоро откроется для всех")
         r = db.peek_user(uid)
         if not r:
             raise web.HTTPNotFound(text="Сначала нажми /start в боте")
@@ -275,6 +277,13 @@ def _limit(uid, key, sec=4):
     db.kv_set(f"{key}:{uid}", str(int(time.time())))
 
 
+def _stars(price):
+    if config.STARS_RUB_PER_STAR <= 0:
+        return 0
+    import features
+    return features.stars_for(price)
+
+
 def _plans_for(u):
     """Тарифы с персональными ценами (скидки по промокоду, акции, скидка на первую покупку) и выгодой относительно месяца."""
     items = list(config.PLANS.items())
@@ -285,7 +294,8 @@ def _plans_for(u):
         price, _code, label = db.price_info(u, k)
         daily = price / v[1]
         out.append({"key": k, "name": v[2], "days": v[1], "price": price, "base": v[0], "label": label,
-                    "per_month": round(daily * 30), "save": max(0, round((1 - daily / mdaily) * 100)) if k != mk else 0})
+                    "per_month": round(daily * 30), "save": max(0, round((1 - daily / mdaily) * 100)) if k != mk else 0,
+                    "stars": _stars(price)})
     return out
 
 
@@ -300,7 +310,28 @@ async def me(request, uid, r):
             "bot": config.BOT_USERNAME, "support": config.SUPPORT_USERNAME, "per_device": bool(config.PER_DEVICE_KEYS),
             "plans": plans, "best": best["key"] if best and best["save"] else None,
             "need_email": config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"],
-            "email": r["email"] or "", "ref_link": f"https://t.me/{config.BOT_USERNAME}?start=ref_{uid}"}
+            "email": r["email"] or "", "ref_link": f"https://t.me/{config.BOT_USERNAME}?start=ref_{uid}",
+            "methods": _methods(), "slot": _slot_info(uid), "ar": _ar_info(r), "disc": db.disc_label(r),
+            "limit": config.HWID_LIMIT + db.slots_active(uid), "created": r["created"], "ref_percent": config.REF_PERCENT,
+            "topup": {"min": config.TOPUP_MIN, "max": config.TOPUP_MAX, "bonus": config.TOPUP_BONUS_PERCENT}}
+
+
+def _methods():
+    return ["sbp", "card"] + (["stars"] if config.STARS_RUB_PER_STAR > 0 else []) + (["crypto"] if config.CRYPTO_TOKEN else [])
+
+
+def _slot_info(uid):
+    if config.SLOT_PRICE <= 0:
+        return None
+    import extras
+    return {"price": config.SLOT_PRICE, "days": config.SLOT_DAYS, "max": config.SLOT_MAX, "active": db.slots_active(uid),
+            "can": extras._slot_block(uid) is None}
+
+
+def _ar_info(r):
+    if not config.AUTORENEW:
+        return None
+    return {"on": bool(r["autorenew"]), "card": (r["pm_title"] if r["pm_id"] else None), "days": config.AUTORENEW_NOTICE_DAYS}
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -315,22 +346,56 @@ async def set_email(request, uid, r):
 
 
 async def pay(request, uid, r):
-    """Оплата тарифа: с баланса сразу, картой или по СБП через ЮKassa (дальше человек платит на странице банка, а приложение ждёт результат)."""
-    import extras
+    """Оплата тарифа или докупка устройства: с баланса сразу; СБП, карта, Stars и крипта через те же платёжные функции, что и в боте.
+    Дальше оплату заканчивает общий код бота (он же шлёт чек и зачисляет), поэтому приложение и бот не расходятся."""
+    import extras, features
     body = await _body(request)
     plan, method = str(body.get("plan", "")), str(body.get("method", ""))
-    if plan not in config.PLANS or method not in ("sbp", "card", "balance"):
+    slot = plan == "slot"
+    allowed = ["sbp", "card", "balance"] + ([] if slot else _methods()[2:])
+    if (not slot and plan not in config.PLANS) or method not in allowed:
         raise web.HTTPBadRequest(text="Выбери тариф и способ оплаты")
     if r["banned"]:
         raise web.HTTPForbidden(text="Доступ закрыт, напиши в поддержку")
+    if slot:
+        why = extras._slot_block(uid)
+        if why:
+            raise web.HTTPBadRequest(text=why)
     _limit(uid, "apipay", 3)
     if method == "balance":
+        if slot:
+            until = db.pay_slot_with_balance(uid)
+            if until is None:
+                raise web.HTTPBadRequest(text="На балансе не хватает средств. Выбери СБП или карту.")
+            try:
+                await panel.apply_limit(uid)
+            except Exception:
+                logging.exception("apply_limit after balance slot uid=%s", uid)
+            return {"status": "paid", "until": until, "slot": True}
         res = db.pay_with_balance(uid, plan, False)
         if res is None:
             raise web.HTTPBadRequest(text="На балансе не хватает средств. Выбери СБП или карту.")
         _kind, until = res
         await panel.set_expiry(uid, until)
         return {"status": "paid", "until": until}
+    label = config.plan_name(plan)
+    try:
+        if method == "stars":
+            from aiogram.types import LabeledPrice
+            pid = db.create_payment(uid, plan, "stars", False)
+            stars = features.stars_for(db.get_payment(pid)["amount"])
+            link = await extras.B.bot.create_invoice_link(
+                title=f"NQYRO · {label}"[:32], description=f"{label}. Оплата Telegram Stars."[:255], payload=f"pid:{pid}",
+                provider_token="", currency="XTR", prices=[LabeledPrice(label=label[:30], amount=stars)])
+            return {"pid": pid, "stars_link": link, "stars": stars}
+        if method == "crypto":
+            pid = db.create_payment(uid, plan, "crypto", False)
+            url = await features.crypto_create(pid, db.get_payment(pid)["amount"], f"NQYRO: {label}")
+            asyncio.create_task(extras.B.watch(pid))
+            return {"pid": pid, "url": url}
+    except Exception:
+        logging.exception("miniapp alt payment uid=%s method=%s", uid, method)
+        raise web.HTTPServiceUnavailable(text="Не удалось создать счёт, попробуй другой способ или повтори через минуту")
     if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"]:
         return {"need_email": True}
     try:
@@ -343,7 +408,6 @@ async def pay(request, uid, r):
     if extras.B is not None:
         asyncio.create_task(extras.B.watch(pid))   # бот сам опросит ЮKassa и зачислит оплату, даже если приложение закроют
     return {"pid": pid, "url": url}
-
 
 async def pay_status(request, uid, r):
     import extras
@@ -442,6 +506,187 @@ async def static_file(request: web.Request):
 
 
 # ---- оплата ----
+PROMO_BAD = {"not_found": "Код не найден. Проверь, нет ли опечатки.", "already": "Этот промокод уже использован на твоём аккаунте.",
+             "exhausted": "У этого промокода не осталось активаций.", "expired": "Срок действия промокода закончился.",
+             "off": "Сейчас этот промокод не действует."}
+
+
+async def withdraw(request, uid, r):
+    """Заявка на вывод реферального баланса: те же проверки, та же запись и то же уведомление владельцам, что и в боте."""
+    import extras
+    body = await _body(request)
+    method, details = str(body.get("method", "")), str(body.get("details", "")).strip()
+    try:
+        amount = round(float(str(body.get("amount", "")).replace(",", ".").replace(" ", "")), 2)
+        assert amount == amount
+    except Exception:
+        raise web.HTTPBadRequest(text="Укажи сумму числом")
+    _limit(uid, "apiwd", 5)
+    i = extras.wd_info(uid); mn = extras._min(uid)
+    if method not in extras.METHODS or i.get("blocked") or i["pending"] or i["cool_until"] or i["avail"] < mn:
+        raise web.HTTPBadRequest(text="Сейчас вывод недоступен")
+    if method == "card":
+        digits = re.sub(r"[\s-]", "", details)
+        if not (digits.isdigit() and 16 <= len(digits) <= 19 and extras.luhn_ok(digits)):
+            raise web.HTTPBadRequest(text="Номер карты не похож на настоящий. Проверь 16 цифр.")
+        details = digits
+    elif method == "sbp":
+        if not re.match(r"^\+?[78]?[\s(-]*\d[\d\s()-]{8,14}\d\s+(\S.{1,40})$", details):
+            raise web.HTTPBadRequest(text="Нужны телефон и банк, например: +79991234567 Сбербанк")
+        details = details[:80]
+    elif not re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", details):
+        raise web.HTTPBadRequest(text="Это не адрес USDT TRC20: он начинается с T и состоит из 34 символов")
+    if amount < mn:
+        raise web.HTTPBadRequest(text=f"Минимум для вывода {mn} ₽")
+    if amount > i["avail"] + 1e-9:
+        raise web.HTTPBadRequest(text=f"Можно вывести не больше {int(i['avail'])} ₽")
+    db.con.execute("UPDATE users SET balance=MAX(0, balance-?) WHERE id=?", (amount, uid))
+    cur = db.con.execute("INSERT INTO payouts(user_id,amount,method,details,status,created) VALUES(?,?,?,?, 'pending', ?)",
+                         (uid, amount, method, details, int(time.time())))
+    db.con.commit(); pid = cur.lastrowid
+    try:
+        B = extras.B; u2 = db.peek_user(uid)
+        prev = db.con.execute("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE user_id=? AND status='paid'", (uid,)).fetchone()[0]
+        await extras.tell(config.ADMIN_IDS,
+                          f"<b>Заявка на вывод #{pid}</b>\n{B.who(u2)} · <code>{uid}</code>\nСумма: <b>{extras.rub(amount)} ₽</b>\n"
+                          f"Способ: {extras.METHODS[method]}\nРеквизиты: <code>{extras.esc(details)}</code>\n"
+                          f"Выплачено ему раньше: {extras.rub(prev)} ₽\n\n{B.features.fraud_line(uid)}\n(заявка из приложения)",
+                          extras.kb([("Выплачено", f"wdp:ok:{pid}"), ("Отклонить", f"wdp:no:{pid}")]))
+    except Exception:
+        logging.exception("withdraw notify pid=%s", pid)
+    return {"id": pid, "amount": amount, "to": extras.mask(method, details)}
+
+
+async def profile(request, uid, r):
+    now = int(time.time())
+    slots = [s[0] for s in db.con.execute("SELECT until FROM slots WHERE user_id=? AND until>? ORDER BY until", (uid, now)).fetchall()]
+    return {"payments": [{"ts": p["created"], "amount": p["amount"], "plan": config.plan_name(p["plan"]), "method": p["method"]}
+                         for p in db.user_payments(uid, 8)],
+            "slots": slots, "created": r["created"], "promo_used": db.promo_use_count(uid)}
+
+
+async def faq(request, uid, r):
+    import extras
+    return {"faq": [{"q": q, "a": a} for q, a in extras.FAQ]}
+
+
+# ---- разделы, которые раньше были только в боте: приложение ничего не просит доделать там ----
+PROMO_BAD = {"not_found": "Такого кода нет. Проверь, нет ли опечатки.", "off": "Этот код отключён.", "expired": "Срок действия кода закончился.",
+             "exhausted": "Этот код уже разобрали.", "already": "Ты уже применял этот код."}
+
+
+async def promo(request, uid, r):
+    body = await _body(request)
+    code = str(body.get("code", "")).strip()
+    if not code or len(code) > 40:
+        raise web.HTTPBadRequest(text="Введи промокод")
+    _limit(uid, "apppromo", 2)
+    status, val, extra = db.use_promo(uid, code)
+    if status == "ok":
+        await panel.set_expiry(uid, extra)
+        return {"status": "ok", "days": val, "until": extra}
+    if status == "disc":
+        return {"status": "disc", "label": db.disc_label(db.get_user(uid))}
+    raise web.HTTPBadRequest(text=PROMO_BAD.get(status, "Код не подошёл"))
+
+
+async def friends(request, uid, r):
+    n, earned, bal = db.friends_stats(uid)
+    out = {"invited": n, "earned": round(earned or 0, 2), "balance": round(bal or 0, 2), "percent": config.REF_PERCENT,
+           "ref_link": f"https://t.me/{config.BOT_USERNAME}?start=ref_{uid}", "wd": None, "methods": [], "payouts": []}
+    try:   # вывод бонусов: те же правила и данные, что в боте (extras.wd_info), приложение ничего не считает по-своему
+        import extras
+        i = extras.wd_info(uid); pend = i.get("pending")
+        rows = db.con.execute("SELECT id,amount,method,status,created FROM payouts WHERE user_id=? ORDER BY id DESC LIMIT 8", (uid,)).fetchall()
+        out["wd"] = {"avail": round(i["avail"], 2), "held": round(i["held"], 2), "min": extras._min(uid), "hold_days": config.PAYOUT_HOLD_DAYS,
+                     "pending": ({"id": pend["id"], "amount": pend["amount"]} if pend else None),
+                     "cool_until": i.get("cool_until") or 0, "blocked": bool(i.get("blocked"))}
+        out["methods"] = [{"key": k, "name": v} for k, v in extras.METHODS.items()]
+        out["payouts"] = [{"id": p["id"], "amount": p["amount"], "method": extras.METHODS.get(p["method"], p["method"]),
+                           "status": p["status"], "ts": p["created"]} for p in rows]
+    except Exception:
+        logging.exception("miniapp friends/withdraw info uid=%s", uid)
+    return out
+
+
+async def history(request, uid, r):
+    return {"payments": [{"ts": p["created"], "amount": p["amount"], "plan": config.plan_name(p["plan"]), "method": p["method"]}
+                         for p in db.user_payments(uid, 15)]}
+
+
+async def topup(request, uid, r):
+    import extras
+    body = await _body(request)
+    try:
+        amount = int(body.get("amount", 0))
+    except (TypeError, ValueError):
+        amount = 0
+    method = str(body.get("method", "sbp"))
+    if not config.TOPUP_MIN <= amount <= config.TOPUP_MAX:
+        raise web.HTTPBadRequest(text=f"Сумма пополнения от {config.TOPUP_MIN} до {config.TOPUP_MAX} ₽")
+    if method not in ("sbp", "card"):
+        raise web.HTTPBadRequest(text="Выбери СБП или карту")
+    if r["banned"]:
+        raise web.HTTPForbidden(text="Доступ закрыт, напиши в поддержку")
+    _limit(uid, "apptopup", 3)
+    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"]:
+        return {"need_email": True}
+    try:
+        pid, url = await payments.create_invoice(uid, "topup", method, r["email"], False, amount)
+    except Exception:
+        logging.exception("miniapp topup uid=%s", uid)
+        raise web.HTTPServiceUnavailable(text="Не удалось создать счёт, попробуй ещё раз через минуту")
+    if url is None:
+        return {"pid": pid, "dev": True}
+    if extras.B is not None:
+        asyncio.create_task(extras.B.watch(pid))
+    return {"pid": pid, "url": url}
+
+
+async def autorenew(request, uid, r):
+    if not config.AUTORENEW:
+        raise web.HTTPBadRequest(text="Автопродление сейчас выключено")
+    on = 1 if (await _body(request)).get("on") else 0
+    db.con.execute("UPDATE users SET autorenew=? WHERE id=?", (on, uid)); db.con.commit()
+    return {"ar": _ar_info(db.get_user(uid))}
+
+
+def _thread(uid):
+    import extras
+    t = extras.tk_open_for(uid)
+    if not t:
+        return {"ticket": None, "messages": []}
+    rows = db.con.execute("SELECT staff,text,ts FROM ticket_msgs WHERE ticket_id=? ORDER BY ts, rowid LIMIT 40", (t["id"],)).fetchall()
+    return {"ticket": t["id"], "messages": [{"staff": bool(x["staff"]), "text": x["text"], "ts": x["ts"]} for x in rows]}
+
+
+async def support_get(request, uid, r):
+    return {**_thread(uid), "support": config.SUPPORT_USERNAME}
+
+
+async def support_send(request, uid, r):
+    """Обращение в поддержку из приложения: та же таблица обращений, что и в боте, сотрудникам оно приходит в бота как обычно."""
+    import extras
+    text = str((await _body(request)).get("text", "")).strip()[:2000]
+    if len(text) < 2:
+        raise web.HTTPBadRequest(text="Опиши, что случилось")
+    _limit(uid, "appticket", 5)
+    t = extras.tk_open_for(uid)
+    if t:
+        tid = t["id"]
+    else:
+        tid = db.con.execute("INSERT INTO tickets(user_id,status,created) VALUES(?, 'open', ?)", (uid, int(time.time()))).lastrowid
+    db.con.execute("INSERT INTO ticket_msgs(ticket_id,staff,text,ts) VALUES(?,0,?,?)", (tid, text, int(time.time()))); db.con.commit()
+    head = f"<b>Обращение #{tid}</b> · {extras.B.who(db.peek_user(uid))} · <code>{uid}</code>\n\n{extras.esc(text)}"
+    markup = extras.kb([("Ответить", f"tkr:{tid}"), ("Закрыть", f"tkc:{tid}")])
+    for sid in extras.support_ids():
+        try:
+            await extras.B.bot.send_message(sid, head, reply_markup=markup, disable_web_page_preview=True)
+        except Exception:
+            logging.warning("не удалось передать обращение сотруднику %s", sid)
+    return {**_thread(uid), "support": config.SUPPORT_USERNAME}
+
+
 async def client_page(request: web.Request):
     try:
         with open(CLIENT_HTML, encoding="utf-8") as f:
@@ -461,6 +706,16 @@ def routes():
             web.post("/api/me/device/add", capi(device_add)),
             web.post("/api/me/device/{n:\\d+}/off", capi(device_off)),
             web.post("/api/me/trial", capi(trial)),
+            web.post("/api/me/promo", capi(promo)),
+            web.get("/api/me/friends", capi(friends)),
+            web.get("/api/me/history", capi(history)),
+            web.post("/api/me/topup", capi(topup)),
+            web.post("/api/me/autorenew", capi(autorenew)),
+            web.get("/api/me/support", capi(support_get)),
+            web.post("/api/me/support", capi(support_send)),
+            web.post("/api/me/withdraw", capi(withdraw)),
+            web.get("/api/me/profile", capi(profile)),
+            web.get("/api/me/faq", capi(faq)),
             web.post("/api/me/email", capi(set_email)),
             web.post("/api/me/pay", capi(pay)),
             web.get("/api/me/payment/{pid:\\d+}", capi(pay_status)),

@@ -101,3 +101,9 @@ WINBACK_HOURS = int(os.getenv("WINBACK_HOURS", "72"))                # скол�
 # Отдельный ключ на каждое устройство (см. panel.create_key). 0: всё как раньше, один ключ на всех устройств человека.
 # 1: «Подключиться» и «Устройства» работают по устройствам, бан устройства отключает только его.
 PER_DEVICE_KEYS = os.getenv("PER_DEVICE_KEYS", "0") == "1"
+
+# Клиентское мини-приложение (кнопка «Открыть приложение»). 1 (по умолчанию): открыто для всех клиентов, владельцы тоже его видят.
+# 0: временно прячем от клиентов, видно и открывается только владельцам из ADMIN_IDS (удобно, пока что-то правишь).
+CLIENT_APP_PUBLIC = os.getenv("CLIENT_APP_PUBLIC", "1") == "1"
+def client_app_visible(uid) -> bool:
+    return bool(OPEN_BASE and WEB_PORT and (CLIENT_APP_PUBLIC or uid in ADMIN_IDS))

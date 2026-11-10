@@ -24,7 +24,10 @@ var PLANS=[{key:'m1',name:'1 месяц',days:30,price:249,base:249,label:'',per
  {key:'m3',name:'3 месяца',days:90,price:649,base:747,label:'-13%',per_month:216,save:13},
  {key:'m12',name:'12 месяцев',days:365,price:1990,base:2988,label:'-33%',per_month:166,save:33}];
 var ME={id:777000,name:'Алекс',banned:false,until:now+23*DAY,days:23,active:true,trial_available:false,trial_days:5,balance:120,
- bot:'nqyro_bot',support:'voidpulse1337',per_device:true,plans:PLANS,best:'m12',need_email:false,email:'demo@mail.ru',ref_link:'https://t.me/nqyro_bot?start=ref_777000'};
+ bot:'nqyro_bot',support:'voidpulse1337',per_device:true,plans:PLANS,best:'m12',need_email:false,email:'demo@mail.ru',ref_link:'https://t.me/nqyro_bot?start=ref_777000',
+ methods:['sbp','card'],slot:{price:99,days:30,max:3,active:0,can:true},ar:{on:true,card:'•• 4242',days:2},disc:'−35% на первую покупку',limit:5,created:now-40*DAY,ref_percent:20,
+ topup:{min:50,max:5000,bonus:5}};
+var MSGS=[];
 function conn(){return {active:true,per_device:true,allowed:5,used:K.reduce(function(a,k){return a+Math.max(1,k.devices.length)},0),can_add:K.length<5,
  happ_dl:'https://www.happ.su',incy_dl:'https://incy.cc',
  keys:K.map(function(k){var s='https://sub.nqyrovpn.site/demo'+k.n;return {n:k.n,sub:s,status:'ACTIVE',devices:k.devices,happ:'https://t.me/nqyro_bot',incy:'https://t.me/nqyro_bot',deep_happ:'happ://add/'+s,deep_incy:'incy://import/'+s}})}}
@@ -35,7 +38,21 @@ function route(p,q,m,b){
   var o=p.match(/^\/api\/me\/device\/(\d+)\/off$/);if(o){var n2=+o[1];K=K.filter(function(k){return k.n!==n2});if(!K.length)K=[{n:1,devices:[]}];return J({ok:true,n:n2,split:0})}
   if(p==='/api/me/email')return J({ok:true});
   if(p==='/api/me/trial')return J({until:now+5*DAY});
-  if(p==='/api/me/pay')return J({dev:true,pid:1});
+  if(p==='/api/me/pay'||p==='/api/me/topup')return J({dev:true,pid:1});
+  if(p==='/api/me/promo'){return (b.code||'').toUpperCase()==='DEMO'?J({status:'ok',days:7,until:now+30*DAY}):E('Такого кода нет. Попробуй DEMO.',400)}
+  if(p==='/api/me/autorenew'){ME.ar.on=!!b.on;return J({ar:ME.ar})}
+  if(p==='/api/me/history')return J({payments:[{ts:now-8*DAY,amount:649,plan:'3 месяца',method:'sbp'},{ts:now-98*DAY,amount:249,plan:'1 месяц',method:'card'},{ts:now-130*DAY,amount:120,plan:'Пополнение',method:'sbp'}]});
+  if(p==='/api/me/friends')return J({invited:6,earned:1240,balance:ME.balance,percent:20,ref_link:ME.ref_link,
+    wd:{avail:840,held:200,min:300,hold_days:7,pending:null,cool_until:0,blocked:false},methods:[{key:'card',name:'Карта'},{key:'sbp',name:'СБП'},{key:'usdt',name:'USDT TRC20'}],
+    payouts:[{id:3,amount:500,method:'Карта',status:'paid',ts:now-20*DAY}]});
+  if(p==='/api/me/withdraw')return J({id:4,amount:+b.amount||0,to:'карта •• 4242'});
+  if(p==='/api/me/support'){if(m==='POST'){MSGS.push({staff:false,text:b.text||'',ts:now});MSGS.push({staff:true,text:'Привет! Это демо-ответ поддержки. Мы на связи.',ts:now+30})}return J({ticket:MSGS.length?1:null,messages:MSGS,support:'voidpulse1337'})}
+  if(p==='/api/me/promo'){var c=(b.code||'').toUpperCase();if(c==='NQYRO5')return J({status:'ok',days:5,until:now+28*DAY});return E('Такого кода нет. В демо работает код NQYRO5.',400)}
+  if(p==='/api/me/friends')return J({invited:7,earned:840,balance:120,percent:20,ref_link:ME.ref_link});
+  if(p==='/api/me/history')return J({payments:[{ts:now-8*DAY,amount:649,plan:'3 месяца',method:'sbp'},{ts:now-98*DAY,amount:249,plan:'1 месяц',method:'card'},{ts:now-130*DAY,amount:300,plan:'Пополнение',method:'sbp'}]});
+  if(p==='/api/me/topup')return J({dev:true,pid:2});
+  if(p==='/api/me/autorenew'){ME.ar.on=!!b.on;return J({ar:ME.ar})}
+  if(p==='/api/me/support'){if(m==='POST'){TK.push({staff:false,text:b.text,ts:now})}return J({ticket:41,messages:TK,support:'voidpulse1337'})}
   if(/^\/api\/me\/payment\/\d+$/.test(p))return J({status:'paid',until:now+53*DAY});
   return E('Демо: такого запроса нет',404)}
 """

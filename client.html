@@ -74,13 +74,23 @@ input.in{width:100%;margin-top:10px;background:var(--card2);border:1.5px solid v
 .hlp{margin-top:8px;border:1px solid var(--line);border-radius:14px;background:var(--card2)}.hlp summary{list-style:none;cursor:pointer;padding:12px 14px;font-size:14px;font-weight:700;color:var(--mut)}
 .hlp summary::-webkit-details-marker{display:none}.hlp[open] summary{color:var(--tx)}.hb{padding:0 14px 12px}.hs{display:flex;gap:10px;margin:9px 0;font-size:13px;line-height:1.5;color:var(--mut)}
 .hs i{flex:none;width:22px;height:22px;border-radius:50%;background:var(--lime);color:#0a1200;font-style:normal;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center}.hs a{color:var(--lime)}
+.chips{display:flex;gap:8px;flex-wrap:wrap}.amt{flex:1;min-width:70px;text-align:center;padding:12px 6px;border-radius:14px;border:1px solid var(--line);background:var(--card2);font-weight:700;font-size:14px}
+.amt.on{border-color:var(--lime);color:var(--lime);background:rgba(198,255,26,.08)}.amt:active{opacity:.6}
+.sw{flex:none;width:52px;height:30px;border-radius:99px;background:#1b2520;border:1px solid var(--line);position:relative;transition:.2s}.sw i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#8b978d;transition:.2s}
+.sw.on{background:rgba(198,255,26,.2);border-color:var(--lime)}.sw.on i{left:25px;background:var(--lime);box-shadow:0 0 10px rgba(198,255,26,.6)}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}.st{text-align:center;margin:0 0 12px}.st .n{font-size:34px;font-weight:800;color:var(--lime);line-height:1.1}
+.prof{display:flex;align-items:center;gap:14px}.av{flex:none;width:52px;height:52px;border-radius:50%;background:var(--lime);color:#0a1200;font-weight:800;font-size:22px;display:flex;align-items:center;justify-content:center;box-shadow:0 0 22px rgba(198,255,26,.3)}
+.bal{font-size:38px;font-weight:800;margin:4px 0 6px;color:var(--lime)}
+.chat{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;max-height:38vh;overflow:auto}.msg{max-width:86%;padding:10px 13px;border-radius:16px;font-size:14px;line-height:1.45;word-break:break-word}
+.msg small{display:block;margin-top:4px;font-size:11px;opacity:.55}.msg.me{align-self:flex-end;background:rgba(198,255,26,.14);border:1px solid rgba(198,255,26,.3)}.msg.st{align-self:flex-start;background:var(--card2);border:1px solid var(--line)}
+textarea.in{resize:none;font-family:inherit}
 </style></head><body>
 <canvas id="bg"></canvas><div class="glow a"></div><div class="glow b"></div><canvas id="fx"></canvas>
 <div class="top"><img src="/static/logo.png" alt="NQYRO"><div class="chip" id="chip">VPN</div></div>
 <div id="view" class="view"></div>
 <div class="sheet" id="sheet"><div class="bd" onclick="closeSheet()"></div><div class="pn"><div class="grab"></div><div id="sc"></div></div></div>
 <div class="toast" id="toast"></div>
-<nav><div data-t="home" class="on"><b>◔</b>Главная</div><div data-t="dev"><b>▣</b>Устройства</div><div data-t="more"><b>☰</b>Ещё</div></nav>
+<nav><div data-t="home" class="on"><b>◔</b>Главная</div><div data-t="dev"><b>▣</b>Устройства</div><div data-t="friends"><b>✦</b>Друзья</div><div data-t="me"><b>☺</b>Профиль</div></nav>
 <script>
 const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();try{tg.setHeaderColor('#05070a');tg.setBackgroundColor('#05070a');tg.disableVerticalSwipes&&tg.disableVerticalSwipes()}catch(e){}}
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -94,7 +104,6 @@ async function api(path,body){
   if(!r.ok){let m=await r.text();try{m=JSON.parse(m).error||m}catch(e){}throw new Error(m||('Ошибка '+r.status))}
   return r.json()}
 function ask(t,f){tg&&tg.showConfirm?tg.showConfirm(t,ok=>ok&&f()):confirm(t)&&f()}
-function openBot(start){const u='https://t.me/'+ME.bot+(start?'?start='+start:'');tg&&tg.openTelegramLink?tg.openTelegramLink(u):location.href=u;setTimeout(()=>tg&&tg.close&&tg.close(),300)}
 function addTo(i,app){const k=D&&D.keys&&D.keys[i];if(!k)return;const u=k[app];if(!u)return toast('Ссылка недоступна, скопируй её вручную',1);
   try{navigator.clipboard&&navigator.clipboard.writeText(k.sub)}catch(e){}   /* на случай ручного добавления ссылка уже в буфере */
   tap();try{tg&&tg.openLink?tg.openLink(u,{try_instant_view:false,try_browser:true}):window.open(u,'_blank')}catch(e){window.open(u,'_blank')}
@@ -114,25 +123,10 @@ if(++n<150)requestAnimationFrame(f);else x.clearRect(0,0,c.width,c.height)})()}
 
 let ME=null,tab='home',D=null;
 document.querySelectorAll('nav div').forEach(b=>b.onclick=()=>{tap();show(b.dataset.t)});
-function show(t){tab=t;document.querySelectorAll('nav div').forEach(x=>x.classList.toggle('on',x.dataset.t===t));window.scrollTo(0,0);({home:home,dev:dev,more:more})[t]()}
 function fail(e){$('#view').innerHTML='<h1>Не получилось</h1><div class="card"><span class="red">'+esc(e.message)+'</span></div><div class="btn p" onclick="boot()">Повторить</div>'}
 function skel(){return '<div class="sk"></div><div class="sk"></div><div class="sk" style="height:60px"></div>'}
 async function boot(){$('#view').innerHTML=skel();try{ME=await api('me');$('#chip').textContent=ME.active?'● активна':'VPN';show(tab)}catch(e){fail(e)}}
 
-function home(){const m=ME;
-  if(m.banned){$('#view').innerHTML='<h1>Доступ закрыт</h1><div class="card">Подписка заблокирована. Напиши в поддержку, разберёмся.</div><div class="btn p" onclick="openUrl(\'https://t.me/'+esc(m.support)+'\')">Поддержка</div>';return}
-  const pct=m.active?Math.min(100,m.days/30*100):0;
-  const un=m.active?plural(m.days,'день','дня','дней'):'дней';
-  $('#view').innerHTML='<div class="hero"><img class="m" src="/static/mascot.jpg" alt="">'+
-  '<div class="in"><div class="mut sm" style="font-weight:700;letter-spacing:1px">'+(m.active?'ПОДПИСКА АКТИВНА':(m.until?'ПОДПИСКА ЗАКОНЧИЛАСЬ':'ЕЩЁ НЕ ПОДКЛЮЧЕНО'))+'</div>'+
-  '<div class="big '+(m.active?'on':'')+'" id="days">0</div><div class="unit">'+un+' осталось</div>'+
-  '<div class="bar"><i style="width:0" id="barf"></i></div>'+
-  '<div class="mut sm" style="margin-top:10px">'+(m.active?'до '+fd(m.until):(m.until?'была до '+fd(m.until):'Привет'+(m.name?', '+esc(m.name):'')+'!'))+'</div></div></div>'+
-  (m.active?'<div class="btn p" onclick="show(\'dev\')">Подключиться</div>':'')+
-  (!m.active&&m.trial_available?'<div class="btn p" onclick="trial()">Попробовать '+m.trial_days+' '+plural(m.trial_days,'день','дня','дней')+' бесплатно</div>':'')+
-  '<h2>'+(m.active?'Продлить':'Выбрать тариф')+'</h2>'+plansHtml()+
-  (m.balance>0?'<div class="card"><div class="row" style="border:0;padding:0"><span class="mut">Баланс</span><b class="lime">'+rub(m.balance)+'</b></div></div>':'');
-  if(m.active){count($('#days'),m.days);setTimeout(function(){const b=$('#barf');if(b)b.style.width=pct+'%'},120)}}
 function plansHtml(){return ME.plans.map(function(p){const best=ME.best===p.key;
   return '<div class="card plan '+(best?'best':'')+'" onclick="openPay(\''+p.key+'\')">'+(best?'<div class="badge">ВЫГОДНО</div>':'')+
   '<div><div class="nm">'+esc(p.name)+'</div><div class="mut sm">'+p.days+' дней · '+rub(p.per_month)+'/мес</div>'+
@@ -143,37 +137,8 @@ async function trial(){tap();try{await api('me/trial',{});vib();confetti();toast
 let PAY={plan:null,method:'sbp',pid:null,polling:false};
 function openSheet(h){$('#sc').innerHTML=h;$('#sheet').classList.add('on');if(tg&&tg.BackButton){tg.BackButton.show();tg.BackButton.onClick(closeSheet)}}
 function closeSheet(){$('#sheet').classList.remove('on');PAY.polling=false;if(tg&&tg.BackButton)tg.BackButton.hide()}
-function openPay(key){tap();const p=ME.plans.find(function(x){return x.key===key});if(!p)return;PAY={plan:key,method:ME.balance>=p.price?'balance':'sbp',pid:null,polling:false};payView()}
-function setM(m){PAY.method=m;tap();payView()}
-function payView(){const p=ME.plans.find(function(x){return x.key===PAY.plan}),can=ME.balance>=p.price;
-  openSheet('<div class="sum"><div><div class="mut sm">Тариф</div><div class="t">'+esc(p.name)+'</div></div><div style="text-align:right">'+(p.price<p.base?'<s class="mut sm">'+rub(p.base)+'</s>':'')+'<div class="t lime">'+rub(p.price)+'</div></div></div>'+
-  (p.label?'<div class="tag">'+esc(p.label)+'</div>':'')+
-  '<h2 style="margin-top:18px">Способ оплаты</h2>'+
-  '<div class="meth '+(PAY.method==='sbp'?'on':'')+'" onclick="setM(\'sbp\')"><div class="ic">⚡</div><div class="tt"><b>СБП</b><span>Мгновенно через банк</span></div><div class="rad"></div></div>'+
-  '<div class="meth '+(PAY.method==='card'?'on':'')+'" onclick="setM(\'card\')"><div class="ic">💳</div><div class="tt"><b>Банковская карта</b><span>Visa, Mastercard, МИР</span></div><div class="rad"></div></div>'+
-  '<div class="meth '+(PAY.method==='balance'?'on':'')+' '+(can?'':'off')+'" onclick="setM(\'balance\')"><div class="ic">◈</div><div class="tt"><b>С баланса</b><span>'+(can?'Доступно '+rub(ME.balance):'Не хватает '+rub(p.price-ME.balance))+'</span></div><div class="rad"></div></div>'+
-  (ME.need_email&&PAY.method!=='balance'?'<h2>Email для чека</h2><input class="in" id="em" type="email" inputmode="email" placeholder="name@mail.ru" value="'+esc(ME.email)+'" autocomplete="email"><div class="mut sm" style="margin:6px 2px 0">Чек об оплате придёт на этот адрес.</div>':'')+
-  '<div class="btn p" id="gopay" onclick="doPay()">Оплатить '+rub(p.price)+'</div>'+
-  '<div class="mut sm" style="text-align:center;margin-top:12px">Stars и крипта доступны в боте</div><div class="btn s" onclick="openBot(\'plans\')">Открыть в боте</div>')}
-async function doPay(){const btn=$('#gopay');if(btn.classList.contains('off'))return;btn.classList.add('off');btn.textContent='Создаю счёт…';tap();
-  const price=ME.plans.find(function(x){return x.key===PAY.plan}).price;
-  try{
-    if(ME.need_email&&PAY.method!=='balance'){const em=($('#em')||{}).value||'';await api('me/email',{email:em});ME.need_email=false;ME.email=em}
-    const r=await api('me/pay',{plan:PAY.plan,method:PAY.method});
-    if(r.need_email){ME.need_email=true;return payView()}
-    if(r.status==='paid')return paid(r.until);
-    if(r.dev){btn.classList.remove('off');btn.textContent='Оплатить '+rub(price);return toast('Тестовый режим: счёт '+r.pid)}
-    PAY.pid=r.pid;waitView(r.pid);openUrl(r.url);poll(r.pid)
-  }catch(e){vib('error');toast(e.message,1);btn.classList.remove('off');btn.textContent='Оплатить '+rub(price)}}
-function waitView(pid){$('#sc').innerHTML='<div class="wait"><div class="spin"></div><h1 style="margin:0 0 8px">Ждём оплату</h1><div class="mut">Оплати на открывшейся странице банка.<br>Здесь всё обновится само, как только платёж пройдёт.</div>'+
-  '<div class="btn s" onclick="check('+pid+',true)">Я оплатил, проверить</div><div class="btn s" onclick="openPay(\''+PAY.plan+'\')">Назад к способам</div></div>'}
-async function check(pid,manual){try{const s=await api('me/payment/'+pid);if(s.status==='paid'){PAY.polling=false;return paid(s.until)}if(s.status==='canceled'){PAY.polling=false;vib('error');toast('Платёж отменён',1);return payView()}if(manual)toast('Пока не видим оплату, подожди минуту',1)}catch(e){if(manual)toast(e.message,1)}}
 async function poll(pid){PAY.polling=true;const end=Date.now()+20*60*1000;while(PAY.polling&&Date.now()<end){await sleep(3500);if(!PAY.polling)break;await check(pid,false)}}
 document.addEventListener('visibilitychange',function(){if(!document.hidden&&PAY.pid&&PAY.polling)check(PAY.pid,false)});
-async function paid(until){PAY.polling=false;vib();confetti();
-  $('#sc').innerHTML='<div class="wait"><div class="okc">✓</div><h1 style="margin:0 0 8px">Оплата прошла</h1><div class="mut">Подписка активна до <b class="lime">'+fd(until)+'</b></div><div class="btn p" onclick="closeSheet();show(\'dev\')">Подключить устройство</div><div class="btn s" onclick="closeSheet()">Готово</div></div>';
-  try{ME=await api('me');$('#chip').textContent='● активна'}catch(e){}if(tab==='home')home()}
-
 function icon(n){n=(n||'').toLowerCase();return /iphone|ipad|ios/.test(n)?'':/android/.test(n)?'🤖':/windows/.test(n)?'🖥':/mac/.test(n)?'💻':'📱'}
 const APPLE='<svg width="22" height="22" viewBox="0 0 24 24" fill="#c6ff1a"><path d="M16.4 12.6c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.2.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.2.9-1.3 1.2-2.5 1.3-2.6-.1 0-2.5-1-2.5-3.7zM14.2 5.7c.6-.8 1.1-1.9.9-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.8-1.3z"/></svg>';
 async function dev(){
@@ -184,7 +149,7 @@ async function dev(){
   '<div class="card"><div class="step"><b>1</b><div>Установи <a style="color:var(--lime);font-weight:700" href="#" onclick="openUrl(D.happ_dl);return false">Happ</a> или <a style="color:var(--lime);font-weight:700" href="#" onclick="openUrl(D.incy_dl);return false">Incy</a></div></div>'+
   '<div class="step"><b>2</b><div>Нажми «Добавить» на карточке своего устройства</div></div><div class="step"><b>3</b><div>Включи VPN. Всё подключится само.</div></div></div>'+
   D.keys.map(function(k,i){return card(k,i)}).join('')+
-  (D.can_add?'<div class="btn" onclick="addDev()">＋ Добавить устройство</div>':(D.per_device?'<div class="mut sm" style="margin:12px 2px">Все места заняты. Отключи ненужное или докупи устройство в боте.</div><div class="btn s" onclick="openBot(\'plans\')">Докупить устройство</div>':''))}
+  (D.can_add?'<div class="btn" onclick="addDev()">＋ Добавить устройство</div>':(D.per_device?'<div class="mut sm" style="margin:12px 2px">Все места заняты. Отключи ненужное'+(ME.slot&&ME.slot.can?' или докупи устройство':'')+'.</div>'+(ME.slot&&ME.slot.can?'<div class="btn" onclick="openPay(\'slot\')">Докупить устройство · '+rub(ME.slot.price)+'</div>':''):''))}
 function card(k,i){const names=k.devices.length?k.devices.map(function(x){return esc(x.name)}).join('<br>'):'ещё не подключено';const ic=icon(k.devices[0]&&k.devices[0].name);
   return '<div class="card"><div class="dv"><div class="ico">'+(ic||APPLE)+'</div>'+
   '<div style="flex:1;min-width:0"><b style="font-size:17px">Устройство '+k.n+'</b><div class="mut sm" style="margin-top:3px">'+names+'</div></div><span class="pill '+(k.devices.length?'on':'')+'">'+(k.devices.length?'в сети':'новое')+'</span></div>'+
@@ -200,13 +165,141 @@ async function addDev(){tap();try{await api('me/device/add',{});vib();confetti()
 function off(n,c){ask(c>1?'Разнести '+c+' устройства по отдельным ключам? Старый общий ключ перестанет работать, для каждого устройства появится своя ссылка.':'Отключить устройство '+n+'? Его ключ перестанет работать, остальные не затронутся.',async function(){
   try{const r=await api('me/device/'+n+'/off',{});vib();toast(r.split?'Готово: у каждого устройства свой ключ':'Устройство отключено');await dev()}catch(e){vib('error');toast(e.message,1)}})}
 
-function more(){const m=ME,share='https://t.me/share/url?url='+encodeURIComponent(m.ref_link)+'&text='+encodeURIComponent('NQYRO VPN: включил и пользуешься');
-  $('#view').innerHTML='<h1>Ещё</h1>'+
-  '<h2>Друзья</h2><div class="card"><div class="mut sm">Приглашай друзей и получай бонусы. Твоя ссылка:</div><div style="margin:10px 0"><code>'+esc(m.ref_link)+'</code></div>'+
-  '<div class="two"><div class="btn p s" onclick="tg&&tg.openTelegramLink?tg.openTelegramLink(\''+share+'\'):openUrl(\''+share+'\')">Поделиться</div><div class="btn s" onclick="copy(\''+m.ref_link+'\')">Копировать</div></div>'+
-  '<div class="btn s" onclick="openBot(\'friends\')">Мои бонусы</div></div>'+
-  '<h2>Помощь</h2><div class="card"><div class="mut sm" style="margin-bottom:6px">Не подключается? Обнови подписку в приложении, проверь, что VPN включён и подписка активна. Не помогло, пиши нам, ответим быстро.</div>'+
-  '<div class="btn p s" onclick="openUrl(\'https://t.me/'+esc(m.support)+'\')">Написать в поддержку</div><div class="btn s" onclick="openBot(\'support\')">Помощь в боте</div></div>'+
-  '<h2>Аккаунт</h2><div class="card"><div class="row"><span class="mut">Мой ID</span><b>'+m.id+'</b></div>'+(m.balance>0?'<div class="row"><span class="mut">Баланс</span><b class="lime">'+rub(m.balance)+'</b></div>':'')+'<div class="btn s" onclick="openBot(\'profile\')">Профиль в боте</div></div>'}
+function planOf(key){if(key==='slot'){const s=ME.slot||{};return{key:'slot',name:'Доп. устройство',days:s.days||30,price:s.price||0,base:s.price||0,label:''}}return ME.plans.find(function(x){return x.key===key})}
+const MI={sbp:['⚡','СБП','Мгновенно через банк'],card:['💳','Банковская карта','Visa, Mastercard, МИР'],stars:['⭐','Telegram Stars','Оплата звёздами внутри Telegram'],crypto:['₿','Криптовалюта','Оплата через криптокошелёк'],balance:['◈','С баланса','']};
+function methHtml(m,on,off,sub){const i=MI[m];return `<div class="meth ${on?'on':''} ${off?'off':''}" onclick="setM('${m}')"><div class="ic">${i[0]}</div><div class="tt"><b>${i[1]}</b><span>${sub||i[2]}</span></div><div class="rad"></div></div>`}
+function emailBlock(){return `<h2>Email для чека</h2><input class="in" id="em" type="email" inputmode="email" placeholder="name@mail.ru" value="${esc(ME.email)}" autocomplete="email"><div class="mut sm" style="margin:6px 2px 0">Чек об оплате придёт на этот адрес.</div>`}
+
+function show(t,keep){tab=t;document.querySelectorAll('nav div').forEach(function(x){x.classList.toggle('on',x.dataset.t===t)});if(!keep)window.scrollTo(0,0);({home:home,dev:dev,friends:friendsTab,me:profile})[t]()}
+async function refresh(){try{ME=await api('me');$('#chip').textContent=ME.active?'● активна':'VPN';if($('#sheet').classList.contains('on')||PAY.polling)return;show(tab,true)}catch(e){}}
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&ME&&!PAY.polling&&!$('#sheet').classList.contains('on'))refresh()});
+
+function home(){const m=ME;
+  if(m.banned){$('#view').innerHTML=`<h1>Доступ закрыт</h1><div class="card">Подписка заблокирована. Напиши в поддержку, разберёмся.</div><div class="btn p" onclick="openSupport()">Написать в поддержку</div>`;return}
+  const pct=m.active?Math.min(100,m.days/30*100):0,un=m.active?plural(m.days,'день','дня','дней'):'дней';
+  $('#view').innerHTML=`<div class="hero"><img class="m" src="/static/mascot.jpg" alt=""><div class="in"><div class="mut sm" style="font-weight:700;letter-spacing:1px">${m.active?'ПОДПИСКА АКТИВНА':(m.until?'ПОДПИСКА ЗАКОНЧИЛАСЬ':'ЕЩЁ НЕ ПОДКЛЮЧЕНО')}</div>
+  <div class="big ${m.active?'on':''}" id="days">0</div><div class="unit">${un} осталось</div><div class="bar"><i style="width:0" id="barf"></i></div>
+  <div class="mut sm" style="margin-top:10px">${m.active?'до '+fd(m.until):(m.until?'была до '+fd(m.until):'Привет'+(m.name?', '+esc(m.name):'')+'!')}</div></div></div>
+  ${m.active?`<div class="btn p" onclick="show('dev')">Подключиться</div>`:''}
+  ${!m.active&&m.trial_available?`<div class="btn p" onclick="trial()">Попробовать ${m.trial_days} ${plural(m.trial_days,'день','дня','дней')} бесплатно</div>`:''}
+  ${m.disc?`<div class="card" style="margin-top:12px"><div class="row" style="border:0;padding:0"><span class="mut">Твоя скидка</span><b class="lime">${esc(m.disc)}</b></div></div>`:''}
+  <h2>${m.active?'Продлить':'Выбрать тариф'}</h2>${plansHtml()}<div class="btn s" onclick="openPromo()">Есть промокод?</div>
+  <div class="card" style="margin-top:12px"><div class="row" style="border:0;padding:0"><span class="mut">Баланс</span><b class="lime">${rub(m.balance)}</b></div><div class="btn s" onclick="openTopup()">Пополнить баланс</div></div>`;
+  if(m.active){count($('#days'),m.days);setTimeout(function(){const b=$('#barf');if(b)b.style.width=pct+'%'},120)}}
+
+function openPay(key){tap();const p=planOf(key);if(!p)return;PAY={plan:key,kind:key==='slot'?'slot':'plan',method:ME.balance>=p.price?'balance':'sbp',pid:null,polling:false};payView()}
+function setM(m){PAY.method=m;tap();if(PAY.kind==='topup')topupView();else payView()}
+function payView(){const p=planOf(PAY.plan),can=ME.balance>=p.price,slot=PAY.kind==='slot';
+  const ms=['sbp','card'].concat(slot?[]:ME.methods.filter(function(x){return x==='stars'||x==='crypto'}));
+  if(PAY.method!=='balance'&&ms.indexOf(PAY.method)<0)PAY.method='sbp';
+  const needEm=ME.need_email&&(PAY.method==='sbp'||PAY.method==='card');
+  openSheet(`<div class="sum"><div><div class="mut sm">${slot?'Покупка':'Тариф'}</div><div class="t">${esc(p.name)}</div></div><div style="text-align:right">${p.price<p.base?`<s class="mut sm">${rub(p.base)}</s>`:''}<div class="t lime">${rub(p.price)}</div></div></div>
+  ${p.label?`<div class="tag">${esc(p.label)}</div>`:''}<h2 style="margin-top:18px">Способ оплаты</h2>
+  ${ms.map(function(m){return methHtml(m,PAY.method===m)}).join('')}${methHtml('balance',PAY.method==='balance',!can,can?'Доступно '+rub(ME.balance):'Не хватает '+rub(p.price-ME.balance))}
+  ${needEm?emailBlock():''}<div class="btn p" id="gopay" onclick="doPay()">Оплатить ${rub(p.price)}</div>`)}
+async function doPay(){const btn=$('#gopay');if(btn.classList.contains('off'))return;const p=planOf(PAY.plan);btn.classList.add('off');btn.textContent='Создаю счёт…';tap();
+  const back=function(){btn.classList.remove('off');btn.textContent='Оплатить '+rub(p.price)};
+  try{
+    if(ME.need_email&&(PAY.method==='sbp'||PAY.method==='card')){const em=($('#em')||{}).value||'';await api('me/email',{email:em});ME.need_email=false;ME.email=em}
+    const r=await api('me/pay',{plan:PAY.plan,method:PAY.method});
+    if(r.need_email){ME.need_email=true;return payView()}
+    if(r.status==='paid')return paid(r.until);
+    if(r.dev){back();return toast('Тестовый режим: счёт '+r.pid)}
+    PAY.pid=r.pid;waitView(r.pid);
+    if(r.stars_link){if(tg&&tg.openInvoice)tg.openInvoice(r.stars_link,function(st){if(st==='paid')check(r.pid,false);else if(st==='cancelled'||st==='failed'){PAY.polling=false;payView()}});else openUrl(r.stars_link)}else openUrl(r.url);
+    poll(r.pid)
+  }catch(e){vib('error');toast(e.message,1);back()}}
+function backPay(){PAY.polling=false;if(PAY.kind==='topup')topupView();else payView()}
+function waitView(pid){$('#sc').innerHTML=`<div class="wait"><div class="spin"></div><h1 style="margin:0 0 8px">Ждём оплату</h1><div class="mut">${PAY.method==='stars'?'Подтверди оплату звёздами в окне Telegram.':'Оплати на открывшейся странице.'}<br>Здесь всё обновится само, как только платёж пройдёт.</div><div class="btn s" onclick="check(${pid},true)">Я оплатил, проверить</div><div class="btn s" onclick="backPay()">Назад к способам</div></div>`}
+async function check(pid,manual){try{const s=await api('me/payment/'+pid);if(s.status==='paid'){PAY.polling=false;return paid(s.until)}if(s.status==='canceled'){PAY.polling=false;vib('error');toast('Платёж отменён',1);return backPay()}if(manual)toast('Пока не видим оплату, подожди минуту',1)}catch(e){if(manual)toast(e.message,1)}}
+async function paid(until){PAY.polling=false;vib();confetti();
+  try{ME=await api('me');$('#chip').textContent=ME.active?'● активна':'VPN'}catch(e){}
+  let title='Оплата прошла',body=`Подписка активна до <b class="lime">${fd(until)}</b>`,act=`<div class="btn p" onclick="closeSheet();show('dev')">Подключить устройство</div>`;
+  if(PAY.kind==='topup'){title='Баланс пополнен';body=`На счету <b class="lime">${rub(ME.balance)}</b>`;act=''}
+  if(PAY.kind==='slot'){title='Устройство добавлено';body='Теперь можно подключить ещё одно устройство.';act=`<div class="btn p" onclick="closeSheet();show('dev')">К устройствам</div>`}
+  $('#sc').innerHTML=`<div class="wait"><div class="okc">✓</div><h1 style="margin:0 0 8px">${title}</h1><div class="mut">${body}</div>${act}<div class="btn s" onclick="closeSheet()">Готово</div></div>`;
+  if(tab==='home')home();else if(tab==='me')profile();else if(tab==='dev'&&PAY.kind==='slot')dev()}
+
+function openTopup(){tap();PAY={plan:'topup',kind:'topup',method:'sbp',pid:null,polling:false,amount:300};topupView()}
+function setAmt(v){PAY.amount=Math.round(Number(v))||0;const b=$('#gotop');if(b)b.textContent='Пополнить на '+rub(PAY.amount);document.querySelectorAll('.amt').forEach(function(x){x.classList.toggle('on',+x.dataset.v===PAY.amount)})}
+function pickAmt(v){tap();setAmt(v);const i=$('#ta');if(i)i.value=v}
+function topupView(){const t=ME.topup;
+  openSheet(`<h1 style="margin:0 0 4px">Пополнить баланс</h1><div class="mut sm">Деньги останутся на балансе, ими можно оплатить любой тариф.${t.bonus?` Бонус <b class="lime">+${t.bonus}%</b> к пополнению.`:''}</div>
+  <div class="chips" style="margin-top:14px">${[100,300,500,1000].map(function(v){return `<div class="amt ${PAY.amount===v?'on':''}" data-v="${v}" onclick="pickAmt(${v})">${rub(v)}</div>`}).join('')}</div>
+  <input class="in" id="ta" type="number" inputmode="numeric" placeholder="Другая сумма, от ${t.min} до ${t.max}" value="${PAY.amount||''}" oninput="setAmt(this.value)" style="margin-top:10px">
+  <h2 style="margin-top:18px">Способ оплаты</h2>${['sbp','card'].map(function(m){return methHtml(m,PAY.method===m)}).join('')}
+  ${ME.need_email?emailBlock():''}<div class="btn p" id="gotop" onclick="doTopup()">Пополнить на ${rub(PAY.amount)}</div>`)}
+async function doTopup(){const b=$('#gotop');if(b.classList.contains('off'))return;const t=ME.topup;
+  if(!(PAY.amount>=t.min&&PAY.amount<=t.max))return toast('Сумма от '+t.min+' до '+t.max+' ₽',1);
+  b.classList.add('off');b.textContent='Создаю счёт…';tap();
+  const back=function(){b.classList.remove('off');b.textContent='Пополнить на '+rub(PAY.amount)};
+  try{
+    if(ME.need_email){const em=($('#em')||{}).value||'';await api('me/email',{email:em});ME.need_email=false;ME.email=em}
+    const r=await api('me/topup',{amount:PAY.amount,method:PAY.method});
+    if(r.need_email){ME.need_email=true;return topupView()}
+    if(r.dev){back();return toast('Тестовый режим: счёт '+r.pid)}
+    PAY.pid=r.pid;waitView(r.pid);openUrl(r.url);poll(r.pid)
+  }catch(e){vib('error');toast(e.message,1);back()}}
+
+function openPromo(){tap();openSheet(`<h1 style="margin:0 0 4px">Промокод</h1><div class="mut sm">Введи код: получишь дни подписки или скидку.</div><input class="in" id="pc" placeholder="КОД" autocapitalize="characters" autocomplete="off" style="margin-top:14px;text-transform:uppercase"><div class="btn p" id="pgo" onclick="doPromo()">Применить</div>`)}
+async function doPromo(){const v=(($('#pc')||{}).value||'').trim();if(!v)return toast('Введи промокод',1);const b=$('#pgo');b.classList.add('off');tap();
+  try{const r=await api('me/promo',{code:v});vib();confetti();
+    const msg=r.status==='ok'?`Подписка продлена на ${r.days} ${plural(r.days,'день','дня','дней')}`:`Скидка применена${r.label?': '+r.label:''}`;
+    $('#sc').innerHTML=`<div class="wait"><div class="okc">✓</div><h1 style="margin:0 0 8px">Готово</h1><div class="mut">${esc(msg)}${r.until?`<br>Подписка до <b class="lime">${fd(r.until)}</b>`:''}</div><div class="btn p" onclick="closeSheet()">Отлично</div></div>`;
+    try{ME=await api('me');$('#chip').textContent=ME.active?'● активна':'VPN'}catch(e){}
+    if(tab==='home')home();else if(tab==='me')profile()
+  }catch(e){vib('error');toast(e.message,1);b.classList.remove('off')}}
+
+async function friendsTab(){$('#view').innerHTML='<h1>Друзья</h1>'+skel();let f;try{f=await api('me/friends')}catch(e){return fail(e)}
+  const share='https://t.me/share/url?url='+encodeURIComponent(f.ref_link)+'&text='+encodeURIComponent('NQYRO VPN: включил и пользуешься');
+  $('#view').innerHTML=`<h1>Друзья</h1><div class="mut" style="margin:0 2px 14px">Приглашай друзей и получай <b class="lime">${f.percent}%</b> с их платежей на баланс.</div>
+  <div class="stats"><div class="card st"><div class="n" id="s1">0</div><div class="mut sm">приглашено</div></div><div class="card st"><div class="n" id="s2">0</div><div class="mut sm">заработано, ₽</div></div></div>
+  <div class="card"><div class="mut sm">Твоя ссылка</div><div style="margin:10px 0"><code>${esc(f.ref_link)}</code></div><div class="two"><div class="btn p s" onclick="shareLink('${share}')">Поделиться</div><div class="btn s" onclick="copy('${f.ref_link}')">Копировать</div></div></div>
+  <div class="card"><div class="row" style="border:0;padding:0"><span class="mut">Бонусный баланс</span><b class="lime">${rub(f.balance)}</b></div><div class="mut sm" style="margin-top:6px">Бонусами можно оплатить подписку.</div></div>${wdHtml(f)}`;
+  count($('#s1'),f.invited);count($('#s2'),Math.round(f.earned))}
+
+/* ---- вывод реферальных бонусов: те же правила, что в боте (проверяет сервер) ---- */
+let WD=null,WDM='card';
+const WDH={card:'Номер карты',sbp:'+79991234567 Сбербанк',usdt:'Адрес USDT TRC20 (начинается с T)'};
+function wdHtml(f){WD=f;const w=f.wd;if(!w)return '';const now=Date.now()/1000;let st='',btn='';
+  if(w.blocked)st='Вывод для этого аккаунта недоступен. Напиши в поддержку.';
+  else if(w.pending)st=`Заявка #${w.pending.id} на ${rub(w.pending.amount)} на рассмотрении. Обычно до 24 часов.`;
+  else if(w.cool_until>now)st=`Следующий вывод можно оформить ${fd(w.cool_until)}.`;
+  else if(w.avail<w.min)st=`Вывод от ${rub(w.min)}. Сейчас доступно ${rub(w.avail)}.`;
+  else btn=`<div class="btn p" onclick="openWithdraw()">Вывести ${rub(w.avail)}</div>`;
+  const pays=(f.payouts||[]).length?'<div style="margin-top:12px">'+f.payouts.map(function(p){return `<div class="row"><div><b>${rub(p.amount)}</b><div class="mut sm">${esc(p.method)} · ${fd(p.ts)}</div></div><span class="pill ${p.status==='paid'?'on':p.status==='pending'?'':'off'}">${p.status==='paid'?'выплачено':p.status==='pending'?'на рассмотрении':'отклонено'}</span></div>`}).join('')+'</div>':'';
+  return `<h2>Вывод</h2><div class="card"><div class="row" style="border:0;padding:0"><span class="mut">Доступно к выводу</span><b class="lime">${rub(w.avail)}</b></div>${w.held>0?`<div class="mut sm" style="margin-top:6px">Ещё ${rub(w.held)} на проверке (${w.hold_days} дн.)</div>`:''}${st?`<div class="mut sm" style="margin-top:8px">${st}</div>`:''}${btn}${pays}</div>`}
+function openWithdraw(){tap();const w=WD.wd;WDM=(WD.methods[0]||{}).key||'card';
+  openSheet(`<h1 style="margin:0 0 4px">Вывод</h1><div class="mut sm">Доступно ${rub(w.avail)}, минимум ${rub(w.min)}.</div>
+  <div class="two" id="wdm" style="margin-top:12px">${WD.methods.map(function(m){return `<div class="btn s ${m.key===WDM?'p':''}" data-k="${m.key}" onclick="pickWd('${m.key}')">${esc(m.name)}</div>`}).join('')}</div>
+  <input class="in" id="wdd" placeholder="${WDH[WDM]||'Реквизиты'}" autocomplete="off" style="margin-top:10px">
+  <input class="in" id="wda" inputmode="decimal" value="${Math.floor(w.avail)}" style="margin-top:10px">
+  <div class="btn p" id="wdgo" onclick="doWithdraw()">Отправить заявку</div>`)}
+function pickWd(k){tap();WDM=k;document.querySelectorAll('#wdm .btn').forEach(function(b){b.classList.toggle('p',b.dataset.k===k)});const i=$('#wdd');if(i)i.placeholder=WDH[k]||'Реквизиты'}
+async function doWithdraw(){const d=(($('#wdd')||{}).value||'').trim(),a=(($('#wda')||{}).value||'').trim();if(!d)return toast('Укажи реквизиты',1);if(!a)return toast('Укажи сумму',1);
+  const b=$('#wdgo');b.classList.add('off');tap();
+  try{const r=await api('me/withdraw',{method:WDM,details:d,amount:a});vib();confetti();
+    $('#sc').innerHTML=`<div class="wait"><div class="okc">✓</div><h1 style="margin:0 0 8px">Заявка отправлена</h1><div class="mut">${rub(r.amount)} на ${esc(r.to)}.<br>Обычно выплата занимает до 24 часов.</div><div class="btn p" onclick="closeSheet();friendsTab()">Готово</div></div>`}
+  catch(e){b.classList.remove('off');vib('error');toast(e.message,1)}}
+function shareLink(u){tap();tg&&tg.openTelegramLink?tg.openTelegramLink(u):openUrl(u)}
+
+function profile(){const m=ME;
+  $('#view').innerHTML=`<h1>Профиль</h1><div class="card prof"><div class="av">${esc((m.name||'N').trim().charAt(0).toUpperCase())}</div><div style="min-width:0"><b style="font-size:18px">${esc(m.name||'Без имени')}</b><div class="mut sm">ID ${m.id}${m.created?' · с '+fd(m.created):''}</div></div></div>
+  <div class="card hot"><div class="mut sm">Баланс</div><div class="bal">${rub(m.balance)}</div><div class="two"><div class="btn p s" onclick="openTopup()">Пополнить</div><div class="btn s" onclick="openPromo()">Промокод</div></div></div>
+  ${m.ar?arHtml():''}
+  <h2>Подписка</h2><div class="card"><div class="row"><span class="mut">Статус</span><b class="${m.active?'ok':'red'}">${m.active?'активна':'не активна'}</b></div>${m.until?`<div class="row"><span class="mut">${m.active?'Действует до':'Закончилась'}</span><b>${fd(m.until)}</b></div>`:''}<div class="row"><span class="mut">Устройств</span><b>до ${m.limit}</b></div>${m.disc?`<div class="row"><span class="mut">Скидка</span><b class="lime">${esc(m.disc)}</b></div>`:''}</div>
+  <div class="btn" onclick="openHistory()">История платежей</div>
+  <h2>Помощь</h2><div class="card"><div class="mut sm" style="margin-bottom:6px">Не подключается? Обнови подписку в Happ или Incy, проверь, что VPN включён и подписка активна. Не помогло, напиши нам, ответим быстро.</div><div class="btn p s" onclick="openSupport()">Написать в поддержку</div></div>`}
+function arHtml(){const a=ME.ar;return `<h2>Автопродление</h2><div class="card"><div class="row" style="border:0;padding:0"><div style="min-width:0"><b>Продлевать автоматически</b><div class="mut sm" style="margin-top:3px">${a.card?'Карта '+esc(a.card)+'. ':'Карта привяжется при следующей оплате картой. '}Предупредим за ${a.days} ${plural(a.days,'день','дня','дней')} до списания.</div></div><div class="sw ${a.on?'on':''}" onclick="toggleAr()"><i></i></div></div></div>`}
+async function toggleAr(){tap();try{const r=await api('me/autorenew',{on:!ME.ar.on});ME.ar=r.ar;vib();profile()}catch(e){vib('error');toast(e.message,1)}}
+async function openHistory(){tap();openSheet('<h1 style="margin:0 0 10px">Платежи</h1>'+skel());
+  try{const d=await api('me/history');$('#sc').innerHTML='<h1 style="margin:0 0 10px">Платежи</h1>'+(d.payments.length?'<div class="card">'+d.payments.map(function(p){return `<div class="row"><div><b>${esc(p.plan)}</b><div class="mut sm">${new Date(p.ts*1000).toLocaleDateString('ru-RU')} · ${p.method==='balance'?'с баланса':esc(p.method)}</div></div><b>${rub(p.amount)}</b></div>`}).join('')+'</div>':'<div class="card"><div class="mut" style="text-align:center;padding:14px 0">Платежей пока нет</div></div>')}catch(e){$('#sc').innerHTML='<div class="card"><span class="red">'+esc(e.message)+'</span></div>'}}
+async function openSupport(){tap();openSheet('<h1 style="margin:0 0 10px">Поддержка</h1>'+skel());try{supportView(await api('me/support'))}catch(e){$('#sc').innerHTML='<div class="card"><span class="red">'+esc(e.message)+'</span></div>'}}
+function supportView(d){const ms=d.messages||[];
+  $('#sc').innerHTML=`<h1 style="margin:0 0 4px">Поддержка</h1><div class="mut sm" style="margin-bottom:12px">${d.ticket?'Обращение #'+d.ticket+'. Ответ придёт сюда и в Telegram.':'Опиши проблему, мы ответим как можно быстрее.'}</div>
+  ${ms.length?'<div class="chat">'+ms.map(function(x){return `<div class="msg ${x.staff?'st':'me'}">${esc(x.text)}<small>${new Date(x.ts*1000).toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</small></div>`}).join('')+'</div>':''}
+  <textarea class="in" id="tx" rows="3" placeholder="Что случилось?"></textarea><div class="btn p" id="tsend" onclick="sendTicket()">Отправить</div><div class="btn s" onclick="openUrl('https://t.me/${esc(d.support)}')">Написать вручную в Telegram</div>`}
+async function sendTicket(){const t=(($('#tx')||{}).value||'').trim();if(t.length<2)return toast('Опиши проблему',1);const b=$('#tsend');b.classList.add('off');tap();
+  try{const d=await api('me/support',{text:t});vib();toast('Отправили');supportView(d)}catch(e){vib('error');toast(e.message,1);b.classList.remove('off')}}
 boot();
 </script></body></html>

@@ -1204,6 +1204,24 @@ async def cmd_newlink(m: Message, command: CommandObject):
         except Exception as e:
             await m.answer(f"Не удалось написать человеку: {esc(e)}")
 
+@router.message(Command("cabinet"))
+async def cmd_cabinet(m: Message):
+    """Приложение NQYRO для любого человека: подписка, устройства, оплата, друзья, поддержка. Данные общие с ботом."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    if not config.client_app_visible(m.from_user.id):
+        return await m.answer("Приложение скоро откроется. Пока всё доступно в боте: /start")
+    await m.answer("<b>Приложение NQYRO</b>\n\nПодписка, устройства, оплата и друзья в одном окне. Всё, что ты сделаешь здесь, сразу видно и в боте, и наоборот.",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=f"{config.OPEN_BASE}/me"))]]))
+
+@router.message(Command("client"), is_owner)
+async def cmd_client(m: Message):
+    """Клиентское приложение так, как его видят клиенты (отдельно от админки /app)."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    if not (config.OPEN_BASE and config.WEB_PORT):
+        return await m.answer("Мини-приложение выключено. Нужны WEB_PORT и OPEN_BASE в .env.")
+    await m.answer("<b>Приложение клиента</b>\n\nТак его видят клиенты. Данные твои: подписка, устройства и платежи общие с ботом.",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть как клиент", web_app=WebAppInfo(url=f"{config.OPEN_BASE}/me"))]]))
+
 @router.message(Command("devices"), is_support)
 async def cmd_devices(m: Message, command: CommandObject):
     u, _ = await pick_user(m, command, "Формат: /devices ID\nСписок устройств человека.")
@@ -1694,7 +1712,7 @@ async def cmd_promo_switch(m: Message, command: CommandObject):
     await m.answer(f"Код {esc(code.upper())} " + ("выключен: ввести его нельзя, статистика сохранена. Включить: /promoon КОД" if off else "снова работает."))
 
 # ----- меню команд -----
-OWNER_MENU = [("app", "Админка (мини-приложение)"), ("newlink", "Новый ключ и автодобавление"), ("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
+OWNER_MENU = [("app", "Админка (мини-приложение)"), ("client", "Приложение клиента"), ("newlink", "Новый ключ и автодобавление"), ("take", "Снять дни"), ("giveall", "Дни всем (компенсация)"), ("payouts", "Заявки на вывод"), ("tickets", "Обращения"),
               ("panel", "Панель: онлайн"), ("ykcheck", "Проверка ЮKassa"), ("sharing", "Кто делится подпиской"), ("promooff", "Выключить промокод"), ("promoon", "Включить промокод"), ("panelraw", "Что отвечает панель про человека"), ("nodes", "Состояние нод"), ("devices", "Устройства человека"), ("funnel", "Воронка"),
               ("top", "Топы"), ("new", "Новые люди и откуда"), ("partnerpromo", "Именной промокод партнёра"),
               ("promostat", "Статистика промокодов партнёров"), ("maintenance", "Режим техработ"), ("export", "Выгрузка в CSV")]
