@@ -29,9 +29,10 @@ h2{font-size:12px;margin:26px 2px 10px;color:var(--mut);text-transform:uppercase
 .btn.d{color:var(--red);border-color:rgba(255,93,93,.28);background:transparent}.btn.s{padding:12px;font-size:14px;border-radius:14px}
 .btn.off{opacity:.4;pointer-events:none}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.two .btn{margin-top:10px}
-.hero{position:relative;overflow:hidden;border-radius:26px;border:1px solid rgba(198,255,26,.35);margin-top:10px;min-height:268px;background:#070b09;box-shadow:0 0 50px rgba(198,255,26,.12)}
-.hero .m{position:absolute;right:-70px;bottom:-20px;height:118%;width:auto;opacity:.95;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 38%);mask-image:linear-gradient(90deg,transparent 0,#000 38%)}
-.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#070b09 18%,rgba(7,11,9,.55) 52%,transparent 80%),linear-gradient(0deg,rgba(7,11,9,.9),transparent 45%);pointer-events:none}
+.hero{position:relative;overflow:hidden;border-radius:26px;border:1px solid rgba(198,255,26,.35);margin-top:10px;min-height:268px;background:radial-gradient(260px 220px at 88% 22%,rgba(198,255,26,.20),transparent 70%),radial-gradient(180px 160px at 100% 100%,rgba(198,255,26,.10),transparent 70%),#070b09;box-shadow:0 0 50px rgba(198,255,26,.12)}
+.hero .m{position:absolute;right:-6px;bottom:0;height:104%;width:auto;pointer-events:none;filter:drop-shadow(0 0 26px rgba(198,255,26,.28));animation:mfloat 5s ease-in-out infinite}
+@keyframes mfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(7,11,9,.82) 8%,rgba(7,11,9,.35) 48%,transparent 72%),linear-gradient(0deg,rgba(7,11,9,.7),transparent 50%);pointer-events:none}
 .hero .in{position:relative;z-index:2;padding:20px 18px;display:flex;flex-direction:column;justify-content:flex-end;min-height:268px}
 .big{font-size:64px;font-weight:900;line-height:.95;letter-spacing:-2px;font-style:italic}
 .big.on{color:var(--lime);text-shadow:0 0 30px rgba(198,255,26,.5)}
@@ -177,7 +178,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden&&ME&
 function home(){const m=ME;
   if(m.banned){$('#view').innerHTML=`<h1>Доступ закрыт</h1><div class="card">Подписка заблокирована. Напиши в поддержку, разберёмся.</div><div class="btn p" onclick="openSupport()">Написать в поддержку</div>`;return}
   const pct=m.active?Math.min(100,m.days/30*100):0,un=m.active?plural(m.days,'день','дня','дней'):'дней';
-  $('#view').innerHTML=`<div class="hero"><img class="m" src="/static/mascot.jpg" alt=""><div class="in"><div class="mut sm" style="font-weight:700;letter-spacing:1px">${m.active?'ПОДПИСКА АКТИВНА':(m.until?'ПОДПИСКА ЗАКОНЧИЛАСЬ':'ЕЩЁ НЕ ПОДКЛЮЧЕНО')}</div>
+  $('#view').innerHTML=`<div class="hero"><img class="m" src="/static/mascot.webp" alt=""><div class="in"><div class="mut sm" style="font-weight:700;letter-spacing:1px">${m.active?'ПОДПИСКА АКТИВНА':(m.until?'ПОДПИСКА ЗАКОНЧИЛАСЬ':'ЕЩЁ НЕ ПОДКЛЮЧЕНО')}</div>
   <div class="big ${m.active?'on':''}" id="days">0</div><div class="unit">${un} осталось</div><div class="bar"><i style="width:0" id="barf"></i></div>
   <div class="mut sm" style="margin-top:10px">${m.active?'до '+fd(m.until):(m.until?'была до '+fd(m.until):'Привет'+(m.name?', '+esc(m.name):'')+'!')}</div></div></div>
   ${m.active?`<div class="btn p" onclick="show('dev')">Подключиться</div>`:''}

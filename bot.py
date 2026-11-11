@@ -247,7 +247,7 @@ async def watch(pid):
 
 async def start_payment(target, uid, plan, method, gift=False, amount=None):
     u = db.get_user(uid)
-    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not u["email"]:
+    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not u["email"] and await payments.receipts_on():
         WAIT_EMAIL[uid] = (plan, method, gift, amount)
         msg = target.message if isinstance(target, CallbackQuery) else target
         await msg.answer("Пришли свой email. На него придёт чек об оплате.")

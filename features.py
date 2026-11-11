@@ -148,7 +148,7 @@ async def renew_failed(uid):
 async def renew_one(u):
     uid = u["id"]; plan = db.last_plan(uid)
     if plan not in config.PLANS: return
-    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not u["email"]: return
+    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not u["email"] and await payments.receipts_on(): return
     now = int(time.time())
     con.execute("INSERT INTO renew_try(user_id,sub_until,n,ts) VALUES(?,?,1,?) ON CONFLICT(user_id,sub_until) DO UPDATE SET n=n+1, ts=?",
                 (uid, u["sub_until"], now, now)); con.commit()

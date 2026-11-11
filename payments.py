@@ -42,7 +42,7 @@ async def create_invoice(uid: int, plan: str, method: str, email: str | None = N
         body["payment_method_data"] = {"type": "bank_card"}
     if config.AUTORENEW and not gift and not topup and plan != "slot" and method != "sbp" and db.get_user(uid)["autorenew"]:
         body["save_payment_method"] = True   # карта сохранится для автопродления (СБП не сохраняется)
-    if config.RECEIPT_MODE == "email" and email:
+    if config.RECEIPT_MODE == "email" and email and await receipts_on():
         body["receipt"] = {"customer": {"email": email}, "items": [{
             "description": "Пополнение баланса NQYRO" if topup else (f"Доп. устройство NQYRO, {config.SLOT_DAYS} дн." if plan == "slot" else f"{'Подарочная подписка' if gift else 'Подписка'} NQYRO, {name}"), "quantity": "1.00", "amount": amount,
             "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
@@ -76,7 +76,7 @@ async def refund(yk_id: str, amount, email: str | None = None, name: str = "") -
     """Возврат платежа целиком через ЮKassa. Бросает исключение, если ЮKassa отказала."""
     value = {"value": f"{int(amount)}.00", "currency": "RUB"}
     body = {"payment_id": yk_id, "amount": value}
-    if config.RECEIPT_MODE == "email" and email:
+    if config.RECEIPT_MODE == "email" and email and await receipts_on():
         body["receipt"] = {"customer": {"email": email}, "items": [{
             "description": "Пополнение баланса NQYRO" if name.startswith("пополнение") else f"Подписка NQYRO, {name}", "quantity": "1.00", "amount": value,
             "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
@@ -115,7 +115,7 @@ async def charge_saved(pid: int, uid: int, pm_id: str, email: str | None = None)
     body = {"amount": amount, "capture": True, "payment_method_id": pm_id,
             "description": f"NQYRO: автопродление, {name}",
             "metadata": {"payment_id": str(pid), "user_id": str(uid), "autorenew": "1"}}
-    if config.RECEIPT_MODE == "email" and email:
+    if config.RECEIPT_MODE == "email" and email and await receipts_on():
         body["receipt"] = {"customer": {"email": email}, "items": [{
             "description": f"Подписка NQYRO, {name}", "quantity": "1.00", "amount": amount,
             "vat_code": config.VAT_CODE, "payment_mode": "full_payment", "payment_subject": "service"}]}
@@ -127,3 +127,23 @@ async def charge_saved(pid: int, uid: int, pm_id: str, email: str | None = None)
                 raise RuntimeError(f"YooKassa {r.status}")
     db.set_yk_id(pid, data["id"])
     return data["status"]
+
+
+_RECEIPTS = {"ts": 0, "on": None}
+
+async def receipts_on() -> bool:
+    """Включены ли чеки (54-ФЗ) в магазине ЮKassa. Если выключены, отправлять receipt нельзя: ЮKassa отклоняет такой платёж.
+    Результат кешируется на 10 минут. Если проверить не вышло, действуем по RECEIPT_MODE из настроек."""
+    if config.RECEIPT_MODE != "email":
+        return False
+    if _RECEIPTS["on"] is not None and time.time() - _RECEIPTS["ts"] < 600:
+        return _RECEIPTS["on"]
+    try:
+        on = bool((await account_info()).get("fiscalization_enabled"))
+        _RECEIPTS.update(ts=time.time(), on=on)
+        if not on:
+            logging.warning("YooKassa: чеки в магазине выключены, receipt в платежах не передаём (RECEIPT_MODE=email игнорируется)")
+        return on
+    except Exception:
+        logging.exception("receipts_on: не удалось проверить магазин ЮKassa")
+        return True

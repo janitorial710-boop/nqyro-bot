@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 import config, db, demo, panel, payments
 
-BUILD = "2026-11-11.4"   # метка версии: видна на /health и внизу приложения, чтобы быстро понять, какая версия запущена
+BUILD = "2026-11-11.6"   # метка версии: видна на /health и внизу приложения, чтобы быстро понять, какая версия запущена
 HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.html")
 MAX_AGE = 24 * 3600   # initData старше суток не принимаем
 
@@ -310,7 +310,7 @@ async def me(request, uid, r):
             "trial_days": config.TRIAL_DAYS, "balance": round(db.total_balance(r), 2),
             "bot": config.BOT_USERNAME, "support": config.SUPPORT_USERNAME, "per_device": bool(config.PER_DEVICE_KEYS),
             "plans": plans, "best": best["key"] if best and best["save"] else None,
-            "need_email": config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"],
+            "need_email": config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"] and await payments.receipts_on(),
             "email": r["email"] or "", "ref_link": f"https://t.me/{config.BOT_USERNAME}?start=ref_{uid}",
             "methods": _methods(), "slot": _slot_info(uid), "ar": _ar_info(r), "disc": db.disc_label(r),
             "limit": config.HWID_LIMIT + db.slots_active(uid), "created": r["created"], "ref_percent": config.REF_PERCENT,
@@ -413,7 +413,7 @@ async def pay(request, uid, r):
     except Exception:
         logging.exception("miniapp alt payment uid=%s method=%s", uid, method)
         raise web.HTTPServiceUnavailable(text="Не удалось создать счёт, попробуй другой способ или повтори через минуту")
-    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"]:
+    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"] and await payments.receipts_on():
         return {"need_email": True}
     try:
         pid, url = await payments.create_invoice(uid, plan, method, r["email"], False, None)
@@ -651,7 +651,7 @@ async def topup(request, uid, r):
     if r["banned"]:
         raise web.HTTPForbidden(text="Доступ закрыт, напиши в поддержку")
     _limit(uid, "apptopup", 3)
-    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"]:
+    if config.RECEIPT_MODE == "email" and not config.DEV_PAY and not r["email"] and await payments.receipts_on():
         return {"need_email": True}
     try:
         pid, url = await payments.create_invoice(uid, "topup", method, r["email"], False, amount)
