@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 import config, db, demo, panel, payments
 
+BUILD = "2026-11-11.4"   # метка версии: видна на /health и внизу приложения, чтобы быстро понять, какая версия запущена
 HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.html")
 MAX_AGE = 24 * 3600   # initData старше суток не принимаем
 
@@ -345,6 +346,22 @@ async def set_email(request, uid, r):
     return {"ok": True}
 
 
+async def _invoice_failed(uid, e, where):
+    """Счёт не создался: пишем в лог, предупреждаем владельцев (как делает бот) и показываем причину владельцу в самом приложении."""
+    logging.exception("miniapp %s uid=%s", where, uid)
+    reason = payments.LAST_ERROR["text"] if time.time() - payments.LAST_ERROR["ts"] < 8 else str(e)
+    try:
+        import extras
+        await extras.B.alert_once("yk_invoice", "Не удалось создать счёт в ЮKassa (из приложения)."
+                                  + (f"\nПричина: {extras.esc(reason)}" if reason else " См. логи.") + "\nПроверить магазин: /ykcheck")
+    except Exception:
+        pass
+    msg = "Не получилось создать счёт. Попробуй ещё раз через минуту."
+    if uid in config.ADMIN_IDS and reason:
+        msg += f"\n\nПричина (видно только тебе): {reason[:220]}"
+    raise web.HTTPServiceUnavailable(text=msg)
+
+
 async def pay(request, uid, r):
     """Оплата тарифа или докупка устройства: с баланса сразу; СБП, карта, Stars и крипта через те же платёжные функции, что и в боте.
     Дальше оплату заканчивает общий код бота (он же шлёт чек и зачисляет), поэтому приложение и бот не расходятся."""
@@ -400,9 +417,8 @@ async def pay(request, uid, r):
         return {"need_email": True}
     try:
         pid, url = await payments.create_invoice(uid, plan, method, r["email"], False, None)
-    except Exception:
-        logging.exception("miniapp invoice uid=%s", uid)
-        raise web.HTTPServiceUnavailable(text="Не удалось создать счёт, попробуй ещё раз через минуту")
+    except Exception as e:
+        await _invoice_failed(uid, e, "invoice")
     if url is None:
         return {"pid": pid, "dev": True}
     if extras.B is not None:
@@ -494,15 +510,21 @@ async def trial(request, uid, r):
     return {"until": until}
 
 
+import assets
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-STATIC_OK = {"mascot.jpg", "logo.png", "n.png"}
 
 
 async def static_file(request: web.Request):
+    """Логотип и маскот. Сначала берём вшитую копию (assets.py), так картинки есть всегда; папка static/ запасная."""
     name = request.match_info["name"]
-    if name not in STATIC_OK:
-        raise web.HTTPNotFound()
-    return web.FileResponse(os.path.join(STATIC_DIR, name), headers={"Cache-Control": "public, max-age=86400"})
+    hdr = {"Cache-Control": "public, max-age=86400"}
+    if name in assets.ASSETS:
+        ct, data = assets.ASSETS[name]
+        return web.Response(body=data, content_type=ct, headers=hdr)
+    p = os.path.join(STATIC_DIR, os.path.basename(name))
+    if name.endswith((".png", ".jpg")) and os.path.isfile(p):
+        return web.FileResponse(p, headers=hdr)
+    raise web.HTTPNotFound()
 
 
 # ---- оплата ----
@@ -633,9 +655,8 @@ async def topup(request, uid, r):
         return {"need_email": True}
     try:
         pid, url = await payments.create_invoice(uid, "topup", method, r["email"], False, amount)
-    except Exception:
-        logging.exception("miniapp topup uid=%s", uid)
-        raise web.HTTPServiceUnavailable(text="Не удалось создать счёт, попробуй ещё раз через минуту")
+    except Exception as e:
+        await _invoice_failed(uid, e, "topup")
     if url is None:
         return {"pid": pid, "dev": True}
     if extras.B is not None:
@@ -693,6 +714,10 @@ async def client_page(request: web.Request):
             body = f.read()
     except OSError:
         return web.Response(status=404, text="client.html not found")
+    import assets
+    for name, uri in assets.INLINE.items():   # логотип и маскот кладём прямо в страницу
+        body = body.replace("/static/" + name, uri)
+    body = body.replace("</body>", f'<div style="text-align:center;color:#4a5550;font-size:10px;padding:2px 0 96px">build {BUILD}</div></body>', 1)
     if request.query.get("demo"):
         body = demo.inject(body, "client")
     return web.Response(text=body, content_type="text/html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})

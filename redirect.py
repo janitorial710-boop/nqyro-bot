@@ -110,7 +110,7 @@ async def yk_hook(request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 async def health(request: web.Request) -> web.Response:
-    return web.Response(text="ok")
+    return web.Response(text=f"ok build {miniapp.BUILD}")
 
 async def start_server():
     """Запускает сервер, если задан WEB_PORT. Возвращает runner (или None)."""
