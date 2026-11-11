@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 import config, db, demo, panel, payments
 
-BUILD = "2026-11-11.6"   # метка версии: видна на /health и внизу приложения, чтобы быстро понять, какая версия запущена
+BUILD = "2026-11-11.7"   # метка версии: видна на /health и внизу приложения, чтобы быстро понять, какая версия запущена
 HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.html")
 MAX_AGE = 24 * 3600   # initData старше суток не принимаем
 
@@ -222,7 +222,7 @@ async def nodes(request, uid):
     return {"nodes": out}
 
 
-async def payments(request, uid):
+async def payments_list(request, uid):
     return {"payments": [{"id": r["pid"], "ts": r["created"], "amount": r["amount"], "plan": config.plan_name(r["plan"]),
                           "method": r["method"], "user": r["id"], "username": r["username"], "name": r["name"]}
                          for r in db.recent_payments(50)]}
@@ -261,9 +261,12 @@ def capi(handler):
             return web.json_response(await handler(request, uid, r), headers={"Cache-Control": "no-store"})
         except web.HTTPException:
             raise
-        except Exception:
+        except Exception as e:
             logging.exception("miniapp client %s uid=%s", request.path, uid)
-            raise web.HTTPInternalServerError(text="Что-то пошло не так, попробуй ещё раз через минуту")
+            msg = "Что-то пошло не так, попробуй ещё раз через минуту"
+            if uid in config.ADMIN_IDS:   # владелец сразу видит причину, не заглядывая в логи
+                msg += f"\n\nПричина (видно только тебе): {type(e).__name__}: {str(e)[:200]}"
+            raise web.HTTPInternalServerError(text=msg)
     return wrap
 
 
@@ -754,5 +757,5 @@ def routes():
             web.post("/api/app/user/{id:\\d+}/key/{n:\\d+}/reissue", api(key_reissue)),
             web.post("/api/app/user/{id:\\d+}/key/{n:\\d+}/send", api(key_send)),
             web.get("/api/app/nodes", api(nodes)),
-            web.get("/api/app/payments", api(payments)),
+            web.get("/api/app/payments", api(payments_list)),
             web.get("/api/app/log", api(log))]
